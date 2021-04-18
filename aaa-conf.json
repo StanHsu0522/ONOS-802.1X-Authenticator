@@ -1,0 +1,11 @@
+{
+	"apps": {
+		"org.opencord.aaa":{
+			"AAA":{
+				"radiusSecret": "winlab_radius_share_secret",
+				"radiusIp": "172.17.0.2",
+				"radiusServerPort": "1812"
+			}
+		}
+	}
+}
