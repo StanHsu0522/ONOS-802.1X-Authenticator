@@ -122,8 +122,10 @@ public class Authenticator8021xManager implements Authenticator8021xService {
     // private static Ip4Prefix dhcpNet;
 
     /** Configure Flow Priority and HardTimeout.*/
-    private static final int FLOWPRIORITY = 50000;
-    private static final int FORBIDFLOWPRIORITY = 50001;
+    private static final int FLOWPRIORITY = 60000;
+    private static final int FORBIDFLOWPRIORITY = 60001;
+    private static final int FORWARDINGPRIORITY = 50000;
+    private static final int FORBIDFORWARDINGPRIORITY = 50001;
     private static final int FORBIDDHCPFLOWPRIORITY = 40001;
     private static final int AUTHENTICATIONTIMEOUT = 240;                // in second
     private static final int AUTHENTICATIONTIMEOUTSPECIAL = 6000;        // in second
@@ -135,6 +137,11 @@ public class Authenticator8021xManager implements Authenticator8021xService {
      * (Group --> user_name)
     */
     private HashMap<String, Set<String>> groups = new HashMap<>();
+
+    /** Group attributes.
+     *  (Group --> groupDscp)
+     */
+    private HashMap<String, Byte> groupDscp = new HashMap<>();
 
     /** Cache DNS resolve i.e. <Domain name, IP address>.
      *  (Domain_name --> resovled_IP_address)
@@ -199,10 +206,10 @@ public class Authenticator8021xManager implements Authenticator8021xService {
         requestIntercepts();
 
         tableInit();
-        dhcpForbidden();
+        initialFlowRules();
 
-        // Timeout check per TIMEOUTCHECKFREQUENCY (in minisecond).
-        timer.schedule(new TimeoutChecker(), 5000, TIMEOUTCHECKFREQUENCY);
+        // // Timeout check per TIMEOUTCHECKFREQUENCY (in minisecond).
+        // timer.schedule(new TimeoutChecker(), 5000, TIMEOUTCHECKFREQUENCY);
     }
 
     @Deactivate
@@ -300,6 +307,10 @@ public class Authenticator8021xManager implements Authenticator8021xService {
         gu.add("guest");
         groups.put(GUEST, gu);
 
+        groupDscp.put(FACULTY,  new Byte((byte) 1));
+        groupDscp.put(STAFF,    new Byte((byte) 2));
+        groupDscp.put(STUDENT,  new Byte((byte) 3));
+        groupDscp.put(GUEST,    new Byte((byte) 4));
 
         /**
          * Set up deny list.
@@ -328,8 +339,10 @@ public class Authenticator8021xManager implements Authenticator8021xService {
      *  Overide DHCP packet-in flow rule installed by ONOS DHCP APP.
      *  Disable this function when you don't use ONOS DHCP APP.
     */
-    private void dhcpForbidden() {
-        List<FlowRule> flowrulesDhcpForbidList = new ArrayList<>();
+    private void initialFlowRules() {
+        List<FlowRule> flowrulesList = new ArrayList<>();
+        List<TrafficSelector.Builder> selectorGroupBuilders = new ArrayList<>();
+
         Set<DeviceId> allDevices = new HashSet<>();
         Set<TopologyCluster> clusters = topologyService.getClusters(topologyService.currentTopology());
         for (TopologyCluster cluster : clusters) {
@@ -337,62 +350,106 @@ public class Authenticator8021xManager implements Authenticator8021xService {
             allDevices.addAll(devices);
         }
 
-        TrafficSelector.Builder selectorBuilder = DefaultTrafficSelector.builder()
+        // selector and treatment for DHCP forbiden
+        TrafficSelector.Builder selectorDhcpForbidBuilder = DefaultTrafficSelector.builder()
             .matchEthType(Ethernet.TYPE_IPV4)
             .matchIPProtocol(IPv4.PROTOCOL_UDP)
             .matchUdpDst(TpPort.tpPort(UDP.DHCP_SERVER_PORT))
             .matchUdpSrc(TpPort.tpPort(UDP.DHCP_CLIENT_PORT));
-        TrafficTreatment.Builder treatmentBuilder = DefaultTrafficTreatment.builder().drop();
+        TrafficTreatment.Builder treatmentDhcpForbidBuilder = DefaultTrafficTreatment.builder().drop();
 
-        /**
-         * Drop DHCP packets at all the switches.
-         */
-        for (DeviceId deviceId : allDevices) {
-            flowrulesDhcpForbidList.add(DefaultFlowRule.builder()
-                .forTable(0)
-                .forDevice(deviceId)
-                .withSelector(selectorBuilder.build())
-                .withTreatment(treatmentBuilder.build())
-                .withPriority(FORBIDDHCPFLOWPRIORITY)
-                .makePermanent()
-                .fromApp(appId)
-                .build());
+        for (Byte dscpID : groupDscp.values()) {
+            selectorGroupBuilders.add(
+                DefaultTrafficSelector.builder()
+                    .matchEthType(Ethernet.TYPE_IPV4)
+                    .matchIPDscp​(dscpID.byteValue())
+            );
         }
 
-        // HostId gwId = HostId.hostId(MacAddress.valueOf(GATEWAYMAC));
-        // Host gw = hostService.p(gwId);
-        // if (gw == null) {
-        //     log.info("Error: @dhcpForbidden() Can't get gateway location!");
-        // }
-        // ConnectPoint gwCp = gw.location();
-        // TrafficSelector.Builder selectorBuilderforGW = DefaultTrafficSelector.builder()
-        //     .matchEthSrc(MacAddress.valueOf(GATEWAYMAC))
-        //     .matchEthType(Ethernet.TYPE_IPV4)
-        //     .matchIPProtocol(IPv4.PROTOCOL_UDP)
-        //     .matchUdpDst(TpPort.tpPort(UDP.DHCP_SERVER_PORT))
-        //     .matchUdpSrc(TpPort.tpPort(UDP.DHCP_CLIENT_PORT));
-        // TrafficTreatment.Builder treatmentBuilderforGW = DefaultTrafficTreatment.builder()
-        //     .setOutput(PortNumber.CONTROLLER);
-        // flowrulesDhcpForbidList.add(DefaultFlowRule.builder()
-        //     .forTable(0)
-        //     .forDevice(gwCp.deviceId())
-        //     .withSelector(selectorBuilderforGW.build())
-        //     .withTreatment(treatmentBuilderforGW.build())
-        //     .withPriority(FLOWPRIORITY)
-        //     .makePermanent()
-        //     .fromApp(appId)
-        //     .build());
+        /**
+         * Install three types of flow rule
+         * 1. DHCP forbidden (at each switch)
+         * 2. Group forwarding (at each switch)
+         * 3. Group forbidden (at core switch)
+         */
+        for (DeviceId deviceId : allDevices) {
 
-        FlowRule[] flowrulesDhcpForbidArr = new FlowRule[flowrulesDhcpForbidList.size()];
+            // 1. DHCP forbidden
+            flowrulesList.add(
+                DefaultFlowRule.builder()
+                    .forTable(0)
+                    .forDevice(deviceId)
+                    .withSelector(selectorDhcpForbidBuilder.build())
+                    .withTreatment(treatmentDhcpForbidBuilder.build())
+                    .withPriority(FORBIDDHCPFLOWPRIORITY)
+                    .makePermanent()
+                    .fromApp(appId)
+                    .build()
+            );
+
+            // 2. Group forwarding
+            TrafficTreatment.Builder treatmentGroupBuilder;
+            if (!deviceId.equals(gwCp.deviceId())) {
+                Path path = calculatePath(ConnectPoint.fromString​(deviceId.toString() + "/1"));
+                if (path == null) {
+                    log.info("Error: @initialFlowRules() Can't get path to gateway!");
+                    return;
+                } else {
+                    treatmentGroupBuilder = DefaultTrafficTreatment.builder()
+                        .setOutput(path.src().port());
+                }
+            }  else {
+                treatmentGroupBuilder = DefaultTrafficTreatment.builder()
+                    .setOutput(gwCp.port())
+                    .setIpDscp((byte) 0);
+            }
+            for (TrafficSelector.Builder selectorGroup : selectorGroupBuilders) {
+                flowrulesList.add(
+                    DefaultFlowRule.builder()
+                    .forTable(0)
+                    .forDevice(deviceId)
+                    .withSelector(selectorGroup.build())
+                    .withTreatment(treatmentGroupBuilder.build())
+                    .withPriority(FORWARDINGPRIORITY)
+                    .makePermanent()
+                    .fromApp(appId)
+                    .build()
+                );
+            }
+        }
+
+        // 3. Group forbidden
+        for (Map.Entry<String, Byte> entry : groupDscp.entrySet()) {
+            for (IpAddress ip : deny.get(entry.getKey())) {
+                TrafficSelector.Builder selectorBuilder = DefaultTrafficSelector.builder()
+                    .matchEthType(Ethernet.TYPE_IPV4)
+                    .matchIPDscp​(entry.getValue())
+                    .matchIPDst(Ip4Prefix.valueOf(ip, Ip4Prefix.MAX_MASK_LENGTH));
+                TrafficTreatment.Builder treatmentBuilder = DefaultTrafficTreatment.builder()
+                    .drop();
+                flowrulesList.add(
+                    DefaultFlowRule.builder()
+                        .forTable(0)
+                        .forDevice(gwCp.deviceId())
+                        .withSelector(selectorBuilder.build())
+                        .withTreatment(treatmentBuilder.build())
+                        .withPriority(FORBIDFORWARDINGPRIORITY)
+                        .makePermanent()
+                        .fromApp(appId)
+                        .build()
+                );
+            }
+        }
+
+        FlowRule[] flowrulesArr = new FlowRule[flowrulesList.size()];
         // List to arrray casting.
-        flowrulesDhcpForbidArr = flowrulesDhcpForbidList.toArray(flowrulesDhcpForbidArr);
-        flowRuleService.applyFlowRules(flowrulesDhcpForbidArr);
+        flowrulesArr = flowrulesList.toArray(flowrulesArr);
+        flowRuleService.applyFlowRules(flowrulesArr);
     }
 
     private class ReactivePacketProcessor implements PacketProcessor {
         @Override
         public void process(PacketContext context) {
-
             if (context.isHandled()) {
                 return;
             }
@@ -427,76 +484,27 @@ public class Authenticator8021xManager implements Authenticator8021xService {
 
         authenLog.tb.get(mac).ruleInstalled = true;
         authenLog.tb.get(mac).ip = srcIp.toString();
-        // HostId clientID = HostId.hostId(mac);
-        // Host client = hostService.getHost(clientID);
-        // if (client == null) {
-        //     log.info("Error: @normalPkt() Can't get host!");
-        //     return;
-        // }
-        // ConnectPoint clientCp = client.location();
 
-        List<FlowRule> uninstalledFlowruleList = new ArrayList<>();
-        try {
-            uninstalledFlowruleList.addAll(flowrulesForbidden(mac, clientCp));
-            uninstalledFlowruleList.addAll(installPathforLegaluser(mac, clientCp));
-        } catch (Exception e) {
-            log.info("Error:" + e.getMessage());
-        }
-
-        FlowRule[] uninstalledFlowruleArr = new FlowRule[uninstalledFlowruleList.size()];
-        // List to array casting.
-        uninstalledFlowruleArr = uninstalledFlowruleList.toArray(uninstalledFlowruleArr);
-        flowRuleService.applyFlowRules(uninstalledFlowruleArr);
-
-        // Send packet to rematch from the start of pipeline.
-        packetOut(context, PortNumber.TABLE);
-    }
-
-    private List<FlowRule> flowrulesForbidden(MacAddress mac, ConnectPoint clientCp) {
-        log.info("enter @flowrulesForbidden()");
-        List<FlowRule> flowrulesForbidden = new ArrayList<>();
-        String userType = acl.get(mac);
-        int timeout = (userType.equals("staff")) ? AUTHENTICATIONTIMEOUTSPECIAL : AUTHENTICATIONTIMEOUT;
-        if (userType == null) {
-            log.info("Error: @flowrulesForbidden() Can't get user type!");
-            return null;
-        }
-
-        for (IpAddress ip : deny.get(userType)) {
-            TrafficSelector.Builder selectorBuilder = DefaultTrafficSelector.builder()
-                .matchEthSrc(mac)
-                .matchEthType(Ethernet.TYPE_IPV4)
-                .matchIPDst(Ip4Prefix.valueOf(ip, Ip4Prefix.MAX_MASK_LENGTH));
-            TrafficTreatment.Builder treatmentBuilder = DefaultTrafficTreatment.builder()
-                .drop();
-            flowrulesForbidden.add(DefaultFlowRule.builder()
-                .forTable(0)
-                .forDevice(clientCp.deviceId())
-                .withSelector(selectorBuilder.build())
-                .withTreatment(treatmentBuilder.build())
-                .withPriority(FORBIDFLOWPRIORITY)
-                .withHardTimeout(timeout)
-                .fromApp(appId)
-                .build());
-        }
-        return flowrulesForbidden;
-    }
-
-    private List<FlowRule> installPathforLegaluser(MacAddress mac, ConnectPoint clientCp) {
-        log.info("enter @installPathforLegaluser()");
         String userType = acl.get(mac);
         int timeout = (userType.equals("staff")) ? AUTHENTICATIONTIMEOUTSPECIAL : AUTHENTICATIONTIMEOUT;
         List<FlowRule> flowrules = new ArrayList<>();
+        Byte userGroupDscp = groupDscp.get(userType);
 
-        // client and dst are at the same switch.
-        if (clientCp.deviceId().equals(gwCp.deviceId())) {
-            if (!clientCp.port().equals(gwCp.port())) {
-                TrafficSelector.Builder selectorBuilderOut = DefaultTrafficSelector.builder()
-                    .matchEthSrc(mac)
-                    .matchEthType(Ethernet.TYPE_IPV4);
-                TrafficTreatment.Builder treatmentBuilderOut = DefaultTrafficTreatment.builder()
-                    .setOutput(gwCp.port());
-                flowrules.add(DefaultFlowRule.builder()
+        Path path = calculatePath(clientCp);
+        if (path == null) {
+            log.info("Error: @normalPkt() Can't get path to gateway!");
+            return;
+        } else {
+            TrafficSelector.Builder selectorBuilderIn = DefaultTrafficSelector.builder()
+                .matchEthDst(mac);
+            TrafficSelector.Builder selectorBuilderOut = DefaultTrafficSelector.builder()
+                .matchEthSrc(mac);
+            TrafficTreatment.Builder treatmentBuilderOut = DefaultTrafficTreatment.builder()
+                .setOutput(path.src().port())
+                .setIpDscp(userGroupDscp.byteValue());
+
+            flowrules.add(
+                DefaultFlowRule.builder()
                     .forTable(0)
                     .forDevice(clientCp.deviceId())
                     .withSelector(selectorBuilderOut.build())
@@ -504,51 +512,15 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                     .withPriority(FLOWPRIORITY)
                     .withHardTimeout(timeout)
                     .fromApp(appId)
-                    .build());
+                    .build()
+            );
 
-                TrafficSelector.Builder selectorBuilderIn = DefaultTrafficSelector.builder()
-                    .matchEthDst(mac)
-                    .matchEthType(Ethernet.TYPE_IPV4);
+            // Installing backward flow rule for user
+            for (Link link : path.links()) {
                 TrafficTreatment.Builder treatmentBuilderIn = DefaultTrafficTreatment.builder()
-                    .setOutput(clientCp.port());
-                flowrules.add(DefaultFlowRule.builder()
-                    .forTable(0)
-                    .forDevice(clientCp.deviceId())
-                    .withSelector(selectorBuilderIn.build())
-                    .withTreatment(treatmentBuilderIn.build())
-                    .withPriority(FLOWPRIORITY)
-                    .withHardTimeout(timeout)
-                    .fromApp(appId)
-                    .build());
-            }
-        } else {
-            Path path = calculatePath(clientCp);
-            if (path == null) {
-                log.info("Error: @normalPkt() Can't get path to gateway!");
-                return null;
-            } else {
-                TrafficSelector.Builder selectorBuilderIn = DefaultTrafficSelector.builder()
-                        .matchEthDst(mac)
-                        .matchEthType(Ethernet.TYPE_IPV4);
-                TrafficSelector.Builder selectorBuilderOut = DefaultTrafficSelector.builder()
-                    .matchEthSrc(mac)
-                    .matchEthType(Ethernet.TYPE_IPV4);
-
-                for (Link link : path.links()) {
-                    TrafficTreatment.Builder treatmentBuilder = DefaultTrafficTreatment.builder()
-                        .setOutput(link.src().port());
-                    flowrules.add(DefaultFlowRule.builder()
-                        .forTable(0)
-                        .forDevice(link.src().deviceId())
-                        .withSelector(selectorBuilderOut.build())
-                        .withTreatment(treatmentBuilder.build())
-                        .withPriority(FLOWPRIORITY)
-                        .withHardTimeout(timeout)
-                        .fromApp(appId)
-                        .build());
-                    TrafficTreatment.Builder treatmentBuilderIn = DefaultTrafficTreatment.builder()
-                        .setOutput(link.dst().port());
-                    flowrules.add(DefaultFlowRule.builder()
+                    .setOutput(link.dst().port());
+                flowrules.add(
+                    DefaultFlowRule.builder()
                         .forTable(0)
                         .forDevice(link.dst().deviceId())
                         .withSelector(selectorBuilderIn.build())
@@ -556,23 +528,15 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                         .withPriority(FLOWPRIORITY)
                         .withHardTimeout(timeout)
                         .fromApp(appId)
-                        .build());
-                }
-                // Last device to the hosts.
-                TrafficTreatment.Builder lastTreatmentBuilderOut = DefaultTrafficTreatment.builder()
-                    .setOutput(gwCp.port());
-                flowrules.add(DefaultFlowRule.builder()
-                    .forTable(0)
-                    .forDevice(gwCp.deviceId())
-                    .withSelector(selectorBuilderOut.build())
-                    .withTreatment(lastTreatmentBuilderOut.build())
-                    .withPriority(FLOWPRIORITY)
-                    .withHardTimeout(timeout)
-                    .fromApp(appId)
-                    .build());
-                TrafficTreatment.Builder lastTreatmentBuilderIn = DefaultTrafficTreatment.builder()
-                    .setOutput(clientCp.port());
-                flowrules.add(DefaultFlowRule.builder()
+                        .build()
+                );
+            }
+
+            // Last device
+            TrafficTreatment.Builder lastTreatmentBuilderIn = DefaultTrafficTreatment.builder()
+                .setOutput(clientCp.port());
+            flowrules.add(
+                DefaultFlowRule.builder()
                     .forTable(0)
                     .forDevice(clientCp.deviceId())
                     .withSelector(selectorBuilderIn.build())
@@ -580,10 +544,17 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                     .withPriority(FLOWPRIORITY)
                     .withHardTimeout(timeout)
                     .fromApp(appId)
-                    .build());
-            }
+                    .build()
+            );
         }
-        return flowrules;
+
+        FlowRule[] flowrulesArr = new FlowRule[flowrules.size()];
+        // List to array casting.
+        flowrulesArr = flowrules.toArray(flowrulesArr);
+        flowRuleService.applyFlowRules(flowrulesArr);
+
+        // Send packet to rematch from the start of pipeline.
+        packetOut(context, PortNumber.TABLE);
     }
 
     private Path calculatePath(ConnectPoint client) {
