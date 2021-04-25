@@ -47,10 +47,9 @@ import java.util.Dictionary;
 import java.util.Properties;
 import java.util.List;
 import java.util.Map;
-// import java.util.Collection;
+import java.util.Collection;
 import java.util.Set;
 import java.util.HashSet;
-// import java.util.LinkedList;
 import java.util.HashMap;
 import java.util.ArrayList;
 import java.util.Date;
@@ -86,6 +85,12 @@ import org.onosproject.net.flow.DefaultFlowRule;
 import org.onosproject.net.flow.FlowRule;
 import org.onosproject.net.flow.FlowRuleService;
 import org.onosproject.net.edge.EdgePortService;
+import org.onosproject.net.meter.MeterService;
+import org.onosproject.net.meter.MeterRequest;
+import org.onosproject.net.meter.DefaultMeterRequest;
+import org.onosproject.net.meter.Band;
+import org.onosproject.net.meter.DefaultBand;
+import org.onosproject.net.meter.Meter;
 // import org.onosproject.dhcp.DhcpService;
 // import org.onosproject.dhcp.DhcpStore;
 
@@ -143,6 +148,16 @@ public class Authenticator8021xManager implements Authenticator8021xService {
      */
     private HashMap<String, Byte> groupDscp = new HashMap<>();
 
+    /** Group attributes.
+     *  (Group --> Meter)
+     */
+    private HashMap<String, Meter> groupMeter = new HashMap<>();
+
+    /** Group attributes.
+     *  (Group --> BandRate)
+     */
+    private HashMap<String, Long> groupBandRate = new HashMap<>();
+
     /** Cache DNS resolve i.e. <Domain name, IP address>.
      *  (Domain_name --> resovled_IP_address)
     */
@@ -184,6 +199,9 @@ public class Authenticator8021xManager implements Authenticator8021xService {
 
     @Reference(cardinality = ReferenceCardinality.MANDATORY)
     protected EdgePortService edgePortService;
+
+    @Reference(cardinality = ReferenceCardinality.MANDATORY)
+    protected MeterService meterService;
 
     // @Reference(cardinality = ReferenceCardinality.MANDATORY)
     // protected DhcpService dhcpService;
@@ -312,6 +330,11 @@ public class Authenticator8021xManager implements Authenticator8021xService {
         groupDscp.put(STUDENT,  new Byte((byte) 3));
         groupDscp.put(GUEST,    new Byte((byte) 4));
 
+        groupBandRate.put(FACULTY,  new Long((long) 100000));
+        groupBandRate.put(STAFF,    new Long((long) 3000));
+        groupBandRate.put(STUDENT,  new Long((long) 2000));
+        groupBandRate.put(GUEST,    new Long((long) 1000));
+
         /**
          * Set up deny list.
         */
@@ -341,14 +364,40 @@ public class Authenticator8021xManager implements Authenticator8021xService {
     */
     private void initialFlowRules() {
         List<FlowRule> flowrulesList = new ArrayList<>();
-        List<TrafficSelector.Builder> selectorGroupBuilders = new ArrayList<>();
+        Map<String, TrafficSelector.Builder> selectorGroupBuilders = new HashMap<>();
 
+        // Get all network devices
         Set<DeviceId> allDevices = new HashSet<>();
         Set<TopologyCluster> clusters = topologyService.getClusters(topologyService.currentTopology());
         for (TopologyCluster cluster : clusters) {
             Set<DeviceId> devices = topologyService.getClusterDevices(topologyService.currentTopology(), cluster);
             allDevices.addAll(devices);
         }
+
+
+
+        // Meter setup
+        for (Map.Entry<String, Long> entry : groupBandRate.entrySet()) {
+            Collection<Band> bands = new ArrayList<>();
+            bands.add(
+                DefaultBand.builder()
+                    .withRate(entry.getValue())
+                    .ofType(Band.Type.DROP)
+                    .burstSize(0)
+                    .build()
+            );
+            MeterRequest meterReq = DefaultMeterRequest.builder()
+                .forDevice(gwCp.deviceId())
+                .fromApp(appId)
+                .withBands(bands)
+                .withUnit(Meter.Unit.KB_PER_SEC)
+                .burst()
+                .add();
+            groupMeter.put(entry.getKey(), meterService.submit(meterReq));
+        }
+
+
+
 
         // selector and treatment for DHCP forbiden
         TrafficSelector.Builder selectorDhcpForbidBuilder = DefaultTrafficSelector.builder()
@@ -358,11 +407,12 @@ public class Authenticator8021xManager implements Authenticator8021xService {
             .matchUdpSrc(TpPort.tpPort(UDP.DHCP_CLIENT_PORT));
         TrafficTreatment.Builder treatmentDhcpForbidBuilder = DefaultTrafficTreatment.builder().drop();
 
-        for (Byte dscpID : groupDscp.values()) {
-            selectorGroupBuilders.add(
+        for (String group : groups.keySet()) {
+            selectorGroupBuilders.put(
+                group,
                 DefaultTrafficSelector.builder()
                     .matchEthType(Ethernet.TYPE_IPV4)
-                    .matchIPDscp​(dscpID.byteValue())
+                    .matchIPDscp​(groupDscp.get(group).byteValue())
             );
         }
 
@@ -394,27 +444,46 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                 if (path == null) {
                     log.info("Error: @initialFlowRules() Can't get path to gateway!");
                     return;
-                } else {
-                    treatmentGroupBuilder = DefaultTrafficTreatment.builder()
-                        .setOutput(path.src().port());
                 }
-            }  else {
                 treatmentGroupBuilder = DefaultTrafficTreatment.builder()
-                    .setOutput(gwCp.port())
-                    .setIpDscp((byte) 0);
-            }
-            for (TrafficSelector.Builder selectorGroup : selectorGroupBuilders) {
-                flowrulesList.add(
-                    DefaultFlowRule.builder()
-                    .forTable(0)
-                    .forDevice(deviceId)
-                    .withSelector(selectorGroup.build())
-                    .withTreatment(treatmentGroupBuilder.build())
-                    .withPriority(FORWARDINGPRIORITY)
-                    .makePermanent()
-                    .fromApp(appId)
-                    .build()
-                );
+                    .setOutput(path.src().port());
+                for (TrafficSelector.Builder selectorGroup : selectorGroupBuilders.values()) {
+                    flowrulesList.add(
+                        DefaultFlowRule.builder()
+                        .forTable(0)
+                        .forDevice(deviceId)
+                        .withSelector(selectorGroup.build())
+                        .withTreatment(treatmentGroupBuilder.build())
+                        .withPriority(FORWARDINGPRIORITY)
+                        .makePermanent()
+                        .fromApp(appId)
+                        .build()
+                    );
+                }
+            } else {
+                Map<String, TrafficTreatment.Builder> treatmentGroupBuilders = new HashMap<>();
+                for (String group : groups.keySet()) {
+                    treatmentGroupBuilders.put(
+                        group,
+                        DefaultTrafficTreatment.builder()
+                            .setOutput(gwCp.port())
+                            .setIpDscp((byte) 0)
+                            .meter(groupMeter.get(group).id())
+                    );
+                }
+                for (String group : groups.keySet()) {
+                    flowrulesList.add(
+                        DefaultFlowRule.builder()
+                        .forTable(0)
+                        .forDevice(deviceId)
+                        .withSelector(selectorGroupBuilders.get(group).build())
+                        .withTreatment(treatmentGroupBuilders.get(group).build())
+                        .withPriority(FORWARDINGPRIORITY)
+                        .makePermanent()
+                        .fromApp(appId)
+                        .build()
+                    );
+                }
             }
         }
 
