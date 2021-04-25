@@ -106,18 +106,20 @@
                 <groupId>org.onosproject</groupId>
                 <artifactId>onos-maven-plugin</artifactId>
             </plugin>
+
             <plugin>
-        <groupId>org.apache.felix</groupId>
-        <artifactId>maven-bundle-plugin</artifactId>
-        <configuration>
-          <instructions>
-            <Karaf-Commands>nctu.winlab.eapauthenticator</Karaf-Commands>
-          </instructions>
-        </configuration>
-      </plugin>
+                <groupId>org.apache.felix</groupId>
+                <artifactId>maven-bundle-plugin</artifactId>
+                <configuration>
+                    <instructions>
+                       <Karaf-Commands>nctu.winlab.eapauthenticator</Karaf-Commands>
+                    </instructions>
+                </configuration>
+            </plugin>
+
             <plugin>
-        <artifactId>maven-checkstyle-plugin</artifactId>
-      </plugin>
+                <artifactId>maven-checkstyle-plugin</artifactId>
+            </plugin>
         </plugins>
     </build>
 
