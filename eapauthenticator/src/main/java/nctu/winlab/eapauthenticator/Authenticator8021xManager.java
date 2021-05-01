@@ -118,45 +118,41 @@ public class Authenticator8021xManager implements Authenticator8021xService {
     // private static final String YOUTUBE = "youtube.com";
 
     // webs which do not have domain name.
-    private static final String VIDEOWEBIP = "140.113.194.237";
-
-
+    private static final String VIDEOWEBIP = "140.113.194.235";
     private static final String GATEWAYMAC = "ea:e9:78:fb:fd:00";
     private final ConnectPoint gwCp = ConnectPoint.fromString​("of:000078321bdf7000/10");
     private static final int DHCPNETMASKLEN = 27;
     // private static Ip4Prefix dhcpNet;
 
-    /** Configure Flow Priority and HardTimeout.*/
+    /** Configure Flow Priority & HardTimeout & Meter rate.*/
     private static final int FLOWPRIORITY = 60000;
     private static final int FORBIDFLOWPRIORITY = 60001;
     private static final int FORWARDINGPRIORITY = 50000;
     private static final int FORBIDFORWARDINGPRIORITY = 50001;
     private static final int FORBIDDHCPFLOWPRIORITY = 40001;
-    private static final int AUTHENTICATIONTIMEOUT = 240;                // in second
-    private static final int AUTHENTICATIONTIMEOUTSPECIAL = 6000;        // in second
+    private static final int FACULTYTIMEOUT =   36000;            // in second
+    private static final int STAFFTIMEOUT =     36000;            // in second
+    private static final int STUDENTTIMEOUT =   36000;            // in second
+    private static final int GUESTTIMEOUT =     36000;            // in second
+    private static final int FACULTYRATE =  1000000;              // in Kbps
+    private static final int STAFFRATE =    100000;               // in Kbps
+    private static final int STUDENTRATE =  10000;                // in Kbps
+    private static final int GUESTRATE =    1000;                 // in Kbps
     private static final long TIMEOUTCHECKFREQUENCY = 10000;
+
     private String someProperty;
     private ApplicationId appId;
+
+    private final Logger log = LoggerFactory.getLogger(getClass());
+    private final AuthenticationLog authenLog = new AuthenticationLog();
+    private ReactivePacketProcessor processor = new ReactivePacketProcessor();
+    private final AuthenticationEventListener authenticationEventHandler = new InternalAuthenticationEventListener();
+    private final Timer timer = new Timer();
 
     /** User Groups (i.e. Faculty, Staff, Student & Guest)
      * (Group --> user_name)
     */
-    private HashMap<String, Set<String>> groups = new HashMap<>();
-
-    /** Group attributes.
-     *  (Group --> groupDscp)
-     */
-    private HashMap<String, Byte> groupDscp = new HashMap<>();
-
-    /** Group attributes.
-     *  (Group --> Meter)
-     */
-    private HashMap<String, Meter> groupMeter = new HashMap<>();
-
-    /** Group attributes.
-     *  (Group --> BandRate)
-     */
-    private HashMap<String, Long> groupBandRate = new HashMap<>();
+    private HashMap<String, AuthenticationGroupConfig> groups = new HashMap<>();
 
     /** Cache DNS resolve i.e. <Domain name, IP address>.
      *  (Domain_name --> resovled_IP_address)
@@ -206,12 +202,6 @@ public class Authenticator8021xManager implements Authenticator8021xService {
     // @Reference(cardinality = ReferenceCardinality.MANDATORY)
     // protected DhcpService dhcpService;
 
-    private final Logger log = LoggerFactory.getLogger(getClass());
-    private final AuthenticationLog authenLog = new AuthenticationLog();
-    private ReactivePacketProcessor processor = new ReactivePacketProcessor();
-    private final AuthenticationEventListener authenticationEventHandler = new InternalAuthenticationEventListener();
-    private final Timer timer = new Timer();
-
     @Activate
     protected void activate() {
         cfgService.registerProperties(getClass());
@@ -226,8 +216,8 @@ public class Authenticator8021xManager implements Authenticator8021xService {
         tableInit();
         initialFlowRules();
 
-        // // Timeout check per TIMEOUTCHECKFREQUENCY (in minisecond).
-        // timer.schedule(new TimeoutChecker(), 5000, TIMEOUTCHECKFREQUENCY);
+        // Timeout check per TIMEOUTCHECKFREQUENCY (in minisecond).
+        timer.schedule(new TimeoutChecker(), 5000, TIMEOUTCHECKFREQUENCY);
     }
 
     @Deactivate
@@ -299,41 +289,64 @@ public class Authenticator8021xManager implements Authenticator8021xService {
             }
         }
 
-
         /**
-         * Seperate users into different groups.
+         * Group setting.
         */
         // faculty
-        Set<String> fa = new HashSet<String>();
-        fa.add("mspuff");
-        fa.add("cctseng");
-        groups.put(FACULTY, fa);
+        AuthenticationGroupConfig facultyGroup = new AuthenticationGroupConfig();
+        facultyGroup.users.add("mspuff");
+        facultyGroup.users.add("cctseng");
+        facultyGroup.dscp = 1;
+        facultyGroup.meterRate = FACULTYRATE;
+        facultyGroup.timeout = FACULTYTIMEOUT;
         // Staff
-        Set<String> staff = new HashSet<String>();
-        staff.add("squidward");
-        staff.add("mrkrabs");
-        staff.add("jeremy");
-        groups.put(STAFF, staff);
+        AuthenticationGroupConfig staffGroup = new AuthenticationGroupConfig();
+        staffGroup.users.add("squidward");
+        staffGroup.users.add("mrkrabs");
+        staffGroup.users.add("jeremy");
+        staffGroup.dscp = 2;
+        staffGroup.meterRate = STAFFRATE;
+        staffGroup.timeout = STAFFTIMEOUT;
         // Student
-        Set<String> stud = new HashSet<String>();
-        stud.add("spongebob");
-        stud.add("patrick");
-        stud.add("stan");
-        groups.put(STUDENT, stud);
+        AuthenticationGroupConfig studentGroup = new AuthenticationGroupConfig();
+        studentGroup.users.add("spongebob");
+        studentGroup.users.add("patrick");
+        studentGroup.users.add("stan");
+        studentGroup.dscp = 3;
+        studentGroup.meterRate = STUDENTRATE;
+        studentGroup.timeout = STUDENTTIMEOUT;
         // Guest
-        Set<String> gu = new HashSet<String>();
-        gu.add("guest");
-        groups.put(GUEST, gu);
+        AuthenticationGroupConfig guestGroup = new AuthenticationGroupConfig();
+        guestGroup.users.add("guest");
+        guestGroup.dscp = 4;
+        guestGroup.meterRate = GUESTRATE;
+        guestGroup.timeout = GUESTTIMEOUT;
 
-        groupDscp.put(FACULTY,  new Byte((byte) 1));
-        groupDscp.put(STAFF,    new Byte((byte) 2));
-        groupDscp.put(STUDENT,  new Byte((byte) 3));
-        groupDscp.put(GUEST,    new Byte((byte) 4));
+        groups.put(FACULTY, facultyGroup);
+        groups.put(STAFF, staffGroup);
+        groups.put(STUDENT, studentGroup);
+        groups.put(GUEST, guestGroup);
 
-        groupBandRate.put(FACULTY,  new Long((long) 100000));
-        groupBandRate.put(STAFF,    new Long((long) 3000));
-        groupBandRate.put(STUDENT,  new Long((long) 2000));
-        groupBandRate.put(GUEST,    new Long((long) 1000));
+         // Group meter setup
+         for (Map.Entry<String, AuthenticationGroupConfig> gEntry : groups.entrySet()) {
+            Collection<Band> bands = new ArrayList<>();
+            bands.add(
+                DefaultBand.builder()
+                    .withRate(gEntry.getValue().meterRate)
+                    .ofType(Band.Type.DROP)
+                    .burstSize(0)
+                    .build()
+            );
+            MeterRequest meterReq = DefaultMeterRequest.builder()
+                .forDevice(gwCp.deviceId())
+                .fromApp(appId)
+                .withBands(bands)
+                .withUnit(Meter.Unit.KB_PER_SEC)
+                .burst()
+                .add();
+            gEntry.getValue().meter = meterService.submit(meterReq);
+            // groupMeter.put(gEntry.getKey(), meterService.submit(meterReq));
+        }
 
         /**
          * Set up deny list.
@@ -374,31 +387,6 @@ public class Authenticator8021xManager implements Authenticator8021xService {
             allDevices.addAll(devices);
         }
 
-
-
-        // Meter setup
-        for (Map.Entry<String, Long> entry : groupBandRate.entrySet()) {
-            Collection<Band> bands = new ArrayList<>();
-            bands.add(
-                DefaultBand.builder()
-                    .withRate(entry.getValue())
-                    .ofType(Band.Type.DROP)
-                    .burstSize(0)
-                    .build()
-            );
-            MeterRequest meterReq = DefaultMeterRequest.builder()
-                .forDevice(gwCp.deviceId())
-                .fromApp(appId)
-                .withBands(bands)
-                .withUnit(Meter.Unit.KB_PER_SEC)
-                .burst()
-                .add();
-            groupMeter.put(entry.getKey(), meterService.submit(meterReq));
-        }
-
-
-
-
         // selector and treatment for DHCP forbiden
         TrafficSelector.Builder selectorDhcpForbidBuilder = DefaultTrafficSelector.builder()
             .matchEthType(Ethernet.TYPE_IPV4)
@@ -407,12 +395,13 @@ public class Authenticator8021xManager implements Authenticator8021xService {
             .matchUdpSrc(TpPort.tpPort(UDP.DHCP_CLIENT_PORT));
         TrafficTreatment.Builder treatmentDhcpForbidBuilder = DefaultTrafficTreatment.builder().drop();
 
-        for (String group : groups.keySet()) {
+        // Create selectors for each group
+        for (Map.Entry<String, AuthenticationGroupConfig> gEntry : groups.entrySet()) {
             selectorGroupBuilders.put(
-                group,
+                gEntry.getKey(),
                 DefaultTrafficSelector.builder()
                     .matchEthType(Ethernet.TYPE_IPV4)
-                    .matchIPDscp​(groupDscp.get(group).byteValue())
+                    .matchIPDscp​(gEntry.getValue().dscp)
             );
         }
 
@@ -462,13 +451,13 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                 }
             } else {
                 Map<String, TrafficTreatment.Builder> treatmentGroupBuilders = new HashMap<>();
-                for (String group : groups.keySet()) {
+                for (Map.Entry<String, AuthenticationGroupConfig> gEntry : groups.entrySet()) {
                     treatmentGroupBuilders.put(
-                        group,
+                        gEntry.getKey(),
                         DefaultTrafficTreatment.builder()
                             .setOutput(gwCp.port())
                             .setIpDscp((byte) 0)
-                            .meter(groupMeter.get(group).id())
+                            .meter(gEntry.getValue().meter.id())
                     );
                 }
                 for (String group : groups.keySet()) {
@@ -488,11 +477,11 @@ public class Authenticator8021xManager implements Authenticator8021xService {
         }
 
         // 3. Group forbidden
-        for (Map.Entry<String, Byte> entry : groupDscp.entrySet()) {
-            for (IpAddress ip : deny.get(entry.getKey())) {
+        for (Map.Entry<String, AuthenticationGroupConfig> gEntry : groups.entrySet()) {
+            for (IpAddress ip : deny.get(gEntry.getKey())) {
                 TrafficSelector.Builder selectorBuilder = DefaultTrafficSelector.builder()
                     .matchEthType(Ethernet.TYPE_IPV4)
-                    .matchIPDscp​(entry.getValue())
+                    .matchIPDscp​(gEntry.getValue().dscp)
                     .matchIPDst(Ip4Prefix.valueOf(ip, Ip4Prefix.MAX_MASK_LENGTH));
                 TrafficTreatment.Builder treatmentBuilder = DefaultTrafficTreatment.builder()
                     .drop();
@@ -554,10 +543,10 @@ public class Authenticator8021xManager implements Authenticator8021xService {
         authenLog.tb.get(mac).ruleInstalled = true;
         authenLog.tb.get(mac).ip = srcIp.toString();
 
-        String userType = acl.get(mac);
-        int timeout = (userType.equals("staff")) ? AUTHENTICATIONTIMEOUTSPECIAL : AUTHENTICATIONTIMEOUT;
         List<FlowRule> flowrules = new ArrayList<>();
-        Byte userGroupDscp = groupDscp.get(userType);
+        String userType = acl.get(mac);
+        log.info("UserTypeeeeeeeee: {}", userType);
+        AuthenticationGroupConfig group = groups.get(userType);
 
         Path path = calculatePath(clientCp);
         if (path == null) {
@@ -565,12 +554,14 @@ public class Authenticator8021xManager implements Authenticator8021xService {
             return;
         } else {
             TrafficSelector.Builder selectorBuilderIn = DefaultTrafficSelector.builder()
-                .matchEthDst(mac);
+                .matchEthDst(mac)
+                .matchEthType(Ethernet.TYPE_IPV4);
             TrafficSelector.Builder selectorBuilderOut = DefaultTrafficSelector.builder()
-                .matchEthSrc(mac);
+                .matchEthSrc(mac)
+                .matchEthType(Ethernet.TYPE_IPV4);
             TrafficTreatment.Builder treatmentBuilderOut = DefaultTrafficTreatment.builder()
                 .setOutput(path.src().port())
-                .setIpDscp(userGroupDscp.byteValue());
+                .setIpDscp(group.dscp);
 
             flowrules.add(
                 DefaultFlowRule.builder()
@@ -579,12 +570,15 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                     .withSelector(selectorBuilderOut.build())
                     .withTreatment(treatmentBuilderOut.build())
                     .withPriority(FLOWPRIORITY)
-                    .withHardTimeout(timeout)
+                    .withHardTimeout(group.timeout)
                     .fromApp(appId)
                     .build()
             );
 
             // Installing backward flow rule for user
+            // path:    link1 ---- link2 ---- ... ---- linkn
+            //       (src   dst)(src   dst)   ...   (src   dst)
+            //        clientCp                          geCp
             for (Link link : path.links()) {
                 TrafficTreatment.Builder treatmentBuilderIn = DefaultTrafficTreatment.builder()
                     .setOutput(link.dst().port());
@@ -595,13 +589,13 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                         .withSelector(selectorBuilderIn.build())
                         .withTreatment(treatmentBuilderIn.build())
                         .withPriority(FLOWPRIORITY)
-                        .withHardTimeout(timeout)
+                        .withHardTimeout(group.timeout)
                         .fromApp(appId)
                         .build()
                 );
             }
 
-            // Last device
+            // Last device (clientCp)
             TrafficTreatment.Builder lastTreatmentBuilderIn = DefaultTrafficTreatment.builder()
                 .setOutput(clientCp.port());
             flowrules.add(
@@ -611,7 +605,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                     .withSelector(selectorBuilderIn.build())
                     .withTreatment(lastTreatmentBuilderIn.build())
                     .withPriority(FLOWPRIORITY)
-                    .withHardTimeout(timeout)
+                    .withHardTimeout(group.timeout)
                     .fromApp(appId)
                     .build()
             );
@@ -669,14 +663,6 @@ public class Authenticator8021xManager implements Authenticator8021xService {
         packetService.cancelPackets(selector.build(), PacketPriority.REACTIVE, appId);
     }
 
-    // private void flood(PacketContext context) {
-    //     if (topologyService.isBroadcastPoint(topologyService.currentTopology(), context.inPacket().receivedFrom())) {
-    //         packetOut(context, PortNumber.FLOOD);
-    //     } else {
-    //         context.block();
-    //     }
-    // }
-
     private void packetOut(PacketContext context, PortNumber portNumber) {
         context.treatmentBuilder().setOutput(portNumber);
         context.send();
@@ -715,7 +701,6 @@ public class Authenticator8021xManager implements Authenticator8021xService {
 
             /** Some user was authenticated. */
             if (state.equals("AUTHORIZED_STATE")) {
-                String group = GUEST;
                 Date date = new Date();
 
                 // Skip the authorized user
@@ -727,10 +712,10 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                 }
 
                 /** Set up ACL. */
-                for (Map.Entry<String, Set<String>> mapelement : groups.entrySet()) {
-                    Set tmpset = mapelement.getValue();
+                for (Map.Entry<String, AuthenticationGroupConfig> gEntry : groups.entrySet()) {
+                    Set tmpset = gEntry.getValue().users;
                     if (tmpset.contains(uname)) {
-                        acl.put(supMac, mapelement.getKey());
+                        acl.put(supMac, gEntry.getKey());
                         authenLog.tb.get(supMac).joinTime = date.getTime();
                         break;
                     }
@@ -740,19 +725,20 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                     return;
                 }
 
-                dhcpAllow(supMac);
+                dhcpAllow(supMac, connectp);
             }
         }
 
         /**
          * Allow DHCP.
          * @param supMac
+         * @param cp
          */
-        private void dhcpAllow(MacAddress supMac) {
+        private void dhcpAllow(MacAddress supMac, ConnectPoint cp) {
             log.info("enter @ dhcpAllow()");
-            List<FlowRule> flowrulesDhcpAllowList = new ArrayList<>();
+            // List<FlowRule> flowrulesDhcpAllowList = new ArrayList<>();
             String userType = acl.get(supMac);
-            int timeout = (userType.equals("staff")) ? AUTHENTICATIONTIMEOUTSPECIAL : AUTHENTICATIONTIMEOUT;
+            AuthenticationGroupConfig group = groups.get(userType);
 
             /**
              * TODO: initially hostService doesn't know where the client is attached on.
@@ -766,44 +752,42 @@ public class Authenticator8021xManager implements Authenticator8021xService {
             // }
             // ConnectPoint clientCp = client.location();
 
-            /**
-             * Work-around: install flow rules on the edge switches.
-             */
-            Iterable<ConnectPoint> edgeCps = edgePortService.getEdgePoints();
-            Iterator<ConnectPoint> itEdgeCps = edgeCps.iterator();
-            List<DeviceId> edgeSw = new ArrayList<>();
+            // /**
+            //  * Work-around: install flow rules on the edge switches.
+            //  */
+            // Iterable<ConnectPoint> edgeCps = edgePortService.getEdgePoints();
+            // Iterator<ConnectPoint> itEdgeCps = edgeCps.iterator();
+            // List<DeviceId> edgeSw = new ArrayList<>();
 
-            // Use Edge Connection Points to get all the edge switches.
-            while (itEdgeCps.hasNext()) {
-                DeviceId tmpID = itEdgeCps.next().deviceId();
-                if (!edgeSw.contains(tmpID)) {
-                    edgeSw.add(tmpID);
-                }
-            }
+            // // Use Edge Connection Points to get all the edge switches.
+            // while (itEdgeCps.hasNext()) {
+            //     DeviceId tmpID = itEdgeCps.next().deviceId();
+            //     if (!edgeSw.contains(tmpID)) {
+            //         edgeSw.add(tmpID);
+            //     }
+            // }
 
-            for (DeviceId deviceId : edgeSw) {
-                TrafficSelector.Builder selectorBuilder = DefaultTrafficSelector.builder()
-                    .matchEthSrc(supMac)
-                    .matchEthType(Ethernet.TYPE_IPV4)
-                    .matchIPProtocol(IPv4.PROTOCOL_UDP)
-                    .matchUdpDst(TpPort.tpPort(UDP.DHCP_SERVER_PORT))
-                    .matchUdpSrc(TpPort.tpPort(UDP.DHCP_CLIENT_PORT));
-                TrafficTreatment.Builder treatmentBuilder = DefaultTrafficTreatment.builder()
-                    .setOutput(PortNumber.CONTROLLER);
-                flowrulesDhcpAllowList.add(DefaultFlowRule.builder()
-                    .forTable(0)
-                    .forDevice(deviceId)
-                    .withSelector(selectorBuilder.build())
-                    .withTreatment(treatmentBuilder.build())
-                    .withPriority(FLOWPRIORITY)
-                    .withHardTimeout(timeout)
-                    .fromApp(appId)
-                    .build());
-            }
-            FlowRule[] flowrulesDhcpAllowArr = new FlowRule[flowrulesDhcpAllowList.size()];
-            // List to array casting.
-            flowrulesDhcpAllowArr = flowrulesDhcpAllowList.toArray(flowrulesDhcpAllowArr);
-            flowRuleService.applyFlowRules(flowrulesDhcpAllowArr);
+            TrafficSelector.Builder selectorBuilder = DefaultTrafficSelector.builder()
+                .matchEthSrc(supMac)
+                .matchEthType(Ethernet.TYPE_IPV4)
+                .matchIPProtocol(IPv4.PROTOCOL_UDP)
+                .matchUdpDst(TpPort.tpPort(UDP.DHCP_SERVER_PORT))
+                .matchUdpSrc(TpPort.tpPort(UDP.DHCP_CLIENT_PORT));
+            TrafficTreatment.Builder treatmentBuilder = DefaultTrafficTreatment.builder()
+                .setOutput(PortNumber.CONTROLLER);
+            FlowRule flow = DefaultFlowRule.builder()
+                .forTable(0)
+                .forDevice(cp.deviceId())
+                .withSelector(selectorBuilder.build())
+                .withTreatment(treatmentBuilder.build())
+                .withPriority(FLOWPRIORITY)
+                .withHardTimeout(group.timeout)
+                .fromApp(appId)
+                .build();
+            // FlowRule[] flowrulesDhcpAllowArr = new FlowRule[flowrulesDhcpAllowList.size()];
+            // // List to array casting.
+            // flowrulesDhcpAllowArr = flowrulesDhcpAllowList.toArray(flowrulesDhcpAllowArr);
+            flowRuleService.applyFlowRules(flow);
         }
     }
 
@@ -816,9 +800,9 @@ public class Authenticator8021xManager implements Authenticator8021xService {
             for (Map.Entry<MacAddress, Supplicant> entry : authenLog.tb.entrySet()) {
                 Supplicant sup = entry.getValue();
                 String userType = acl.get(sup.mac);
-                int timeout = (userType.equals("staff")) ? AUTHENTICATIONTIMEOUTSPECIAL : AUTHENTICATIONTIMEOUT;
+                AuthenticationGroupConfig group = groups.get(userType);
                 long testPeriod = date.getTime() - sup.joinTime;
-                if ((int) testPeriod > timeout * 1000) {
+                if ((int) testPeriod > group.timeout * 1000) {
                     MacAddress mac = entry.getKey();
                     log.info("*** User ({} {} {}) authentication Timeout!!",
                     sup.name,
