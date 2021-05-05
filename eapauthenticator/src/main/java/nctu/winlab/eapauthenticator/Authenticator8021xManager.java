@@ -134,10 +134,10 @@ public class Authenticator8021xManager implements Authenticator8021xService {
     private static final int STAFFTIMEOUT =     36000;            // in second
     private static final int STUDENTTIMEOUT =   36000;            // in second
     private static final int GUESTTIMEOUT =     36000;            // in second
-    private static final int FACULTYRATE =  1000000;              // in Kbps
-    private static final int STAFFRATE =    100000;               // in Kbps
-    private static final int STUDENTRATE =  10000;                // in Kbps
-    private static final int GUESTRATE =    1000;                 // in Kbps
+    private static final int FACULTYRATE =  120000;              // in Kbps
+    private static final int STAFFRATE =    90000;               // in Kbps
+    private static final int STUDENTRATE =  60000;                // in Kbps
+    private static final int GUESTRATE =    30000;                 // in Kbps
     private static final long TIMEOUTCHECKFREQUENCY = 10000;
 
     private String someProperty;
@@ -334,7 +334,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                 DefaultBand.builder()
                     .withRate(gEntry.getValue().meterRate)
                     .ofType(Band.Type.DROP)
-                    .burstSize(0)
+                    .burstSize(gEntry.getValue().meterRate / 100)
                     .build()
             );
             MeterRequest meterReq = DefaultMeterRequest.builder()
@@ -345,7 +345,6 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                 .burst()
                 .add();
             gEntry.getValue().meter = meterService.submit(meterReq);
-            // groupMeter.put(gEntry.getKey(), meterService.submit(meterReq));
         }
 
         /**
@@ -818,7 +817,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                     // log.info("DHCPPPPPPPPPPPPPPPPPPP {}", dhcpService.getLeaseTime());
                 }
             }
-            log.info("Authentication Timeout checked!   {}", date);
+            // log.info("Authentication Timeout checked!s   {}", date);
         }
     }
 }
