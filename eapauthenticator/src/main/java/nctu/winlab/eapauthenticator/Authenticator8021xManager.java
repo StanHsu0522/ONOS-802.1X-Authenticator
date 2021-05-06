@@ -65,7 +65,7 @@ import org.onlab.packet.Ip4Prefix;
 import org.onlab.packet.TpPort;
 import org.onlab.packet.UDP;
 // import org.onlab.packet.ICMP;
-// import org.onlab.packet.IpPrefix;
+import org.onlab.packet.IpPrefix;
 import org.onosproject.net.ConnectPoint;
 import org.onosproject.net.topology.TopologyService;
 import org.onosproject.net.topology.TopologyCluster;
@@ -119,8 +119,10 @@ public class Authenticator8021xManager implements Authenticator8021xService {
 
     // webs which do not have domain name.
     private static final String VIDEOWEBIP = "140.113.194.235";
+    private static final String MONITORIP = "192.168.44.103";
     private static final String GATEWAYMAC = "ea:e9:78:fb:fd:00";
     private final ConnectPoint gwCp = ConnectPoint.fromString​("of:000078321bdf7000/10");
+    private final ConnectPoint monitorCp = ConnectPoint.fromString​("of:000078321bdf7000/9");
     private static final int DHCPNETMASKLEN = 27;
     // private static Ip4Prefix dhcpNet;
 
@@ -133,7 +135,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
     private static final int FACULTYTIMEOUT =   36000;            // in second
     private static final int STAFFTIMEOUT =     36000;            // in second
     private static final int STUDENTTIMEOUT =   36000;            // in second
-    private static final int GUESTTIMEOUT =     36000;            // in second
+    private static final int GUESTTIMEOUT =     180;            // in second
     private static final int FACULTYRATE =  120000;              // in Kbps
     private static final int STAFFRATE =    90000;               // in Kbps
     private static final int STUDENTRATE =  60000;                // in Kbps
@@ -204,7 +206,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
 
     @Activate
     protected void activate() {
-        cfgService.registerProperties(getClass());
+        // cfgService.registerProperties(getClass());
         appId = coreService.registerApplication("nctu.winlab.eapauthenticator");
         // dhcpNet = Ip4Prefix.valueOf("192.168.44.164/27");
         log.info("Started");
@@ -428,7 +430,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
             // 2. Group forwarding
             TrafficTreatment.Builder treatmentGroupBuilder;
             if (!deviceId.equals(gwCp.deviceId())) {
-                Path path = calculatePath(ConnectPoint.fromString​(deviceId.toString() + "/1"));
+                Path path = calculatePath(ConnectPoint.fromString​(deviceId.toString() + "/1"), gwCp);
                 if (path == null) {
                     log.info("Error: @initialFlowRules() Can't get path to gateway!");
                     return;
@@ -547,7 +549,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
         log.info("UserTypeeeeeeeee: {}", userType);
         AuthenticationGroupConfig group = groups.get(userType);
 
-        Path path = calculatePath(clientCp);
+        Path path = calculatePath(clientCp, gwCp);
         if (path == null) {
             log.info("Error: @normalPkt() Can't get path to gateway!");
             return;
@@ -610,6 +612,79 @@ public class Authenticator8021xManager implements Authenticator8021xService {
             );
         }
 
+        // Install path between monitor (plot client) and supplicant (plot server).
+        Path monitorPath = calculatePath(clientCp, monitorCp);
+        if (monitorPath == null) {
+            log.info("Error: @normalPkt() Can't get path to monitor!");
+            return;
+        } else {
+            TrafficSelector.Builder selectorBuilderOut = DefaultTrafficSelector.builder()
+                .matchEthType(Ethernet.TYPE_IPV4)
+                .matchIPDst(IpPrefix.valueOf(IpAddress.valueOf(MONITORIP),
+                                                Ip4Prefix.MAX_INET_MASK_LENGTH));
+            TrafficSelector.Builder selectorBuilderIn = DefaultTrafficSelector.builder()
+                .matchEthType(Ethernet.TYPE_IPV4)
+                .matchIPSrc(IpPrefix.valueOf(IpAddress.valueOf(MONITORIP),
+                                                Ip4Prefix.MAX_INET_MASK_LENGTH));
+
+            for (Link link : path.links()) {
+                TrafficTreatment.Builder treatmentBuilderOut = DefaultTrafficTreatment.builder()
+                    .setOutput(link.src().port());
+                TrafficTreatment.Builder treatmentBuilderIn = DefaultTrafficTreatment.builder()
+                    .setOutput(link.dst().port());
+                flowrules.add(
+                    DefaultFlowRule.builder()
+                        .forTable(0)
+                        .forDevice(link.src().deviceId())
+                        .withSelector(selectorBuilderOut.build())
+                        .withTreatment(treatmentBuilderOut.build())
+                        .withPriority(FLOWPRIORITY)
+                        .withHardTimeout(group.timeout)
+                        .fromApp(appId)
+                        .build()
+                );
+                flowrules.add(
+                    DefaultFlowRule.builder()
+                        .forTable(0)
+                        .forDevice(link.dst().deviceId())
+                        .withSelector(selectorBuilderIn.build())
+                        .withTreatment(treatmentBuilderIn.build())
+                        .withPriority(FLOWPRIORITY)
+                        .withHardTimeout(group.timeout)
+                        .fromApp(appId)
+                        .build()
+                );
+            }
+
+            // Last device (clientCp & monitorCp)
+            TrafficTreatment.Builder lastTreatmentBuilderOut = DefaultTrafficTreatment.builder()
+                .setOutput(monitorCp.port());
+            TrafficTreatment.Builder lastTreatmentBuilderIn = DefaultTrafficTreatment.builder()
+                .setOutput(clientCp.port());
+            flowrules.add(
+                DefaultFlowRule.builder()
+                    .forTable(0)
+                    .forDevice(monitorCp.deviceId())
+                    .withSelector(selectorBuilderOut.build())
+                    .withTreatment(lastTreatmentBuilderOut.build())
+                    .withPriority(FLOWPRIORITY)
+                    .withHardTimeout(group.timeout)
+                    .fromApp(appId)
+                    .build()
+            );
+            flowrules.add(
+                DefaultFlowRule.builder()
+                    .forTable(0)
+                    .forDevice(clientCp.deviceId())
+                    .withSelector(selectorBuilderIn.build())
+                    .withTreatment(lastTreatmentBuilderIn.build())
+                    .withPriority(FLOWPRIORITY)
+                    .withHardTimeout(group.timeout)
+                    .fromApp(appId)
+                    .build()
+            );
+        }
+
         FlowRule[] flowrulesArr = new FlowRule[flowrules.size()];
         // List to array casting.
         flowrulesArr = flowrules.toArray(flowrulesArr);
@@ -619,22 +694,22 @@ public class Authenticator8021xManager implements Authenticator8021xService {
         packetOut(context, PortNumber.TABLE);
     }
 
-    private Path calculatePath(ConnectPoint client) {
+    private Path calculatePath(ConnectPoint cp1, ConnectPoint cp2) {
         Set<Path> paths =
             topologyService.getPaths(topologyService.currentTopology(),
-                                    client.deviceId(),
-                                    gwCp.deviceId());
+                                    cp1.deviceId(),
+                                    cp2.deviceId());
         if (paths.isEmpty()) {
             log.info("Error: @calculatePath() Path is empty when calculate Path");
             return null;
         }
 
         // Pick a path that does not lead back to where the client is.
-        Path path = pickForwardPathIfPossible(paths, client.port());
+        Path path = pickForwardPathIfPossible(paths, cp1.port());
         if (path == null) {
             log.info("Error: @calculatePath() Don't know where to go from here {} to Gateway {}",
-                        client,
-                        gwCp);
+                        cp1,
+                        cp2);
             return null;
         } else {
             return path;
@@ -739,33 +814,6 @@ public class Authenticator8021xManager implements Authenticator8021xService {
             String userType = acl.get(supMac);
             AuthenticationGroupConfig group = groups.get(userType);
 
-            /**
-             * TODO: initially hostService doesn't know where the client is attached on.
-             * Use config file to config client's location.
-             */
-            // HostId clientID = HostId.hostId(supMac);
-            // Host client = hostService.getHost(clientID);
-            // if (client == null) {
-            //     log.info("Error: @flowruleForbidden() get host!");
-            //     return;
-            // }
-            // ConnectPoint clientCp = client.location();
-
-            // /**
-            //  * Work-around: install flow rules on the edge switches.
-            //  */
-            // Iterable<ConnectPoint> edgeCps = edgePortService.getEdgePoints();
-            // Iterator<ConnectPoint> itEdgeCps = edgeCps.iterator();
-            // List<DeviceId> edgeSw = new ArrayList<>();
-
-            // // Use Edge Connection Points to get all the edge switches.
-            // while (itEdgeCps.hasNext()) {
-            //     DeviceId tmpID = itEdgeCps.next().deviceId();
-            //     if (!edgeSw.contains(tmpID)) {
-            //         edgeSw.add(tmpID);
-            //     }
-            // }
-
             TrafficSelector.Builder selectorBuilder = DefaultTrafficSelector.builder()
                 .matchEthSrc(supMac)
                 .matchEthType(Ethernet.TYPE_IPV4)
@@ -783,9 +831,6 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                 .withHardTimeout(group.timeout)
                 .fromApp(appId)
                 .build();
-            // FlowRule[] flowrulesDhcpAllowArr = new FlowRule[flowrulesDhcpAllowList.size()];
-            // // List to array casting.
-            // flowrulesDhcpAllowArr = flowrulesDhcpAllowList.toArray(flowrulesDhcpAllowArr);
             flowRuleService.applyFlowRules(flow);
         }
     }
