@@ -55,7 +55,7 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.Iterator;
 import java.util.Map.Entry;
-import java.util.Timer;
+// import java.util.Timer;
 
 import org.onlab.packet.MacAddress;
 import org.onlab.packet.IpAddress;
@@ -132,10 +132,10 @@ public class Authenticator8021xManager implements Authenticator8021xService {
     private static final int FORWARDINGPRIORITY = 50000;
     private static final int FORBIDFORWARDINGPRIORITY = 50001;
     private static final int FORBIDDHCPFLOWPRIORITY = 40001;
-    private static final int FACULTYTIMEOUT =   36000;            // in second
-    private static final int STAFFTIMEOUT =     36000;            // in second
-    private static final int STUDENTTIMEOUT =   36000;            // in second
-    private static final int GUESTTIMEOUT =     180;            // in second
+    private static final int FACULTYTIMEOUT =   3600;            // in second
+    private static final int STAFFTIMEOUT =     3600;            // in second
+    private static final int STUDENTTIMEOUT =   3600;            // in second
+    private static final int GUESTTIMEOUT =     600;            // in second
     private static final int FACULTYRATE =  120000;              // in Kbps
     private static final int STAFFRATE =    90000;               // in Kbps
     private static final int STUDENTRATE =  60000;                // in Kbps
@@ -149,7 +149,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
     private final AuthenticationLog authenLog = new AuthenticationLog();
     private ReactivePacketProcessor processor = new ReactivePacketProcessor();
     private final AuthenticationEventListener authenticationEventHandler = new InternalAuthenticationEventListener();
-    private final Timer timer = new Timer();
+    // private final Timer timer = new Timer();
 
     /** User Groups (i.e. Faculty, Staff, Student & Guest)
      * (Group --> user_name)
@@ -219,7 +219,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
         initialFlowRules();
 
         // Timeout check per TIMEOUTCHECKFREQUENCY (in minisecond).
-        timer.schedule(new TimeoutChecker(), 5000, TIMEOUTCHECKFREQUENCY);
+        // timer.schedule(new TimeoutChecker(), 5000, TIMEOUTCHECKFREQUENCY);
     }
 
     @Deactivate
@@ -228,7 +228,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
         aaaManager.removeListener(authenticationEventHandler);
         packetService.removeProcessor(processor);
         withdrawIntercepts();
-        timer.cancel();
+        // timer.cancel();
         log.info("Stopped");
     }
 
@@ -619,10 +619,12 @@ public class Authenticator8021xManager implements Authenticator8021xService {
             return;
         } else {
             TrafficSelector.Builder selectorBuilderOut = DefaultTrafficSelector.builder()
+                .matchEthSrc(mac)
                 .matchEthType(Ethernet.TYPE_IPV4)
                 .matchIPDst(IpPrefix.valueOf(IpAddress.valueOf(MONITORIP),
                                                 Ip4Prefix.MAX_INET_MASK_LENGTH));
             TrafficSelector.Builder selectorBuilderIn = DefaultTrafficSelector.builder()
+                .matchEthDst(mac)
                 .matchEthType(Ethernet.TYPE_IPV4)
                 .matchIPSrc(IpPrefix.valueOf(IpAddress.valueOf(MONITORIP),
                                                 Ip4Prefix.MAX_INET_MASK_LENGTH));
@@ -862,7 +864,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                     // log.info("DHCPPPPPPPPPPPPPPPPPPP {}", dhcpService.getLeaseTime());
                 }
             }
-            // log.info("Authentication Timeout checked!s   {}", date);
+            log.info("Authentication Timeout checked!   {}", date);
         }
     }
 }
