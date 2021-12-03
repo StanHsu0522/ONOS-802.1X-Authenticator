@@ -40,6 +40,7 @@
         <onos.app.readme>ONOS OSGi bundle archetype.</onos.app.readme>
         <onos.app.requires>org.opencord.aaa</onos.app.requires>
         <aaa.api.version>2.1.0</aaa.api.version>
+        <mysqlConnectorJavaVersion>8.0.16</mysqlConnectorJavaVersion>
     </properties>
 
     <dependencies>
@@ -79,13 +80,6 @@
             <classifier>tests</classifier>
         </dependency>
 
-        <!-- <dependency>
-          <groupId>org.onosproject</groupId>
-            <artifactId>onos-apps-dhcp-api</artifactId>
-            <version>1.8.9</version>
-            <scope>provided</scope>
-        </dependency> -->
-
         <dependency>
           <groupId>org.onosproject</groupId>
           <artifactId>onos-cli</artifactId>
@@ -97,6 +91,13 @@
           <groupId>org.apache.karaf.shell</groupId>
           <artifactId>org.apache.karaf.shell.console</artifactId>
           <scope>provided</scope>
+        </dependency>
+
+        <!-- https://mvnrepository.com/artifact/mysql/mysql-connector-java -->
+        <dependency>
+            <groupId>mysql</groupId>
+            <artifactId>mysql-connector-java</artifactId>
+            <version>${mysqlConnectorJavaVersion}</version>
         </dependency>
     </dependencies>
 
@@ -110,15 +111,28 @@
             <plugin>
                 <groupId>org.apache.felix</groupId>
                 <artifactId>maven-bundle-plugin</artifactId>
+                <!-- <version>3.5.0</version> -->
+                <extensions>true</extensions>
                 <configuration>
                     <instructions>
-                       <Karaf-Commands>nctu.winlab.eapauthenticator</Karaf-Commands>
+                        <Karaf-Commands>nctu.winlab.eapauthenticator</Karaf-Commands>
+                        <Bundle-Name>${onos.app.origin} ${onos.app.title}</Bundle-Name>
+                        <Bundle-SymbolicName>${project.groupId}.${project.artifactId}</Bundle-SymbolicName>
+                        <Bundle-Version>${project.version}</Bundle-Version>
+                        <Import-Package>
+                            *
+                        </Import-Package>
                     </instructions>
                 </configuration>
             </plugin>
 
             <plugin>
                 <artifactId>maven-checkstyle-plugin</artifactId>
+                <!-- Uncomment to disable checkstyle validation -->
+                <configuration>
+                    <skip>true</skip>
+                </configuration>
+               
             </plugin>
         </plugins>
     </build>
