@@ -46,11 +46,9 @@ import java.net.InetAddress;
 import java.util.Dictionary;
 import java.util.Properties;
 import java.util.List;
-import java.util.Map;
 import java.util.Collection;
 import java.util.Set;
 import java.util.HashSet;
-import java.util.HashMap;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
@@ -65,6 +63,7 @@ import org.onlab.packet.Ip4Prefix;
 import org.onlab.packet.TpPort;
 import org.onlab.packet.UDP;
 import org.onlab.packet.EthType.EtherType;
+import org.onlab.packet.dhcp.Dhcp6LeaseQueryOption;
 import org.onlab.packet.IpPrefix;
 import org.onosproject.net.ConnectPoint;
 import org.onosproject.net.topology.TopologyService;
@@ -575,6 +574,8 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                                     // } catch (SQLException e) {
                                     //     log.info("[SQLException] (@9002) state: " + e.getSQLState() + " message: " + e.getMessage());
                                     // }
+                                    log.info("Device {} location changed!!! From {}/{} to {}/{}",
+                                        srcMac, switchID, switchPort, switchID_now, switchPort_now);
 
                                     // purge dirty flowrules
                                     List<FlowRule> flowsToBeDel = supFlowrules.get(srcMac);
