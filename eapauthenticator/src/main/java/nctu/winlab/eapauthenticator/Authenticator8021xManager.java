@@ -193,6 +193,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
         }
 
         DHCPForbid();
+        dbInitial();
         List<String> groups = getAllGroupName();
         for (String grp : groups) {
             log.info("Group '{}' initialing...", grp);
@@ -230,6 +231,25 @@ public class Authenticator8021xManager implements Authenticator8021xService {
     @Override
     public void getBadUsers() {
         commandImpl.getBadUsers();
+    }
+
+    private void dbInitial() {
+        try (Connection connection = DriverManager.getConnection(dbUrl, dbUser, dbPassword)) {
+            try (Statement stmt = connection.createStatement()) {
+                String sql = "DELETE FROM authenLog";
+                stmt.executeUpdate(sql);
+            }
+            try (Statement stmt = connection.createStatement()) {
+                String sql = "ALTER TABLE authenLog AUTO_INCREMENT = 1";
+                stmt.executeUpdate(sql);
+            }
+            try (Statement stmt = connection.createStatement()) {
+                String sql = "DELETE FROM authorizedDevice";
+                stmt.executeUpdate(sql);
+            }
+        } catch (SQLException e) {
+            log.info("[SQLException] (@3000) state: " + e.getSQLState() + " message: " + e.getMessage());
+        }
     }
 
     private Set<DeviceId> getAllSwitch() {
