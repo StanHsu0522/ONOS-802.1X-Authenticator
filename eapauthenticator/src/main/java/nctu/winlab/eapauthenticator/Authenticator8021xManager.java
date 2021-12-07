@@ -388,15 +388,15 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                 );
             } else {
                 // check meter is added
-                // while (true) {
-                //     if (meterService.getMeter(gwCp.deviceId(), grpConf.meter.id()).state() == MeterState.ADDED) {
-                //         break;
-                //     }
-                // }
+                while (true) {
+                    if (meterService.getMeter(gwCp.deviceId(), grpConf.meter.id()).state() == MeterState.ADDED) {
+                        break;
+                    }
+                }
                 TrafficTreatment.Builder treatmentBuilder = DefaultTrafficTreatment.builder()
                     .setOutput(gwCp.port())
-                    .setIpDscp((byte) 0);
-                    // .meter(grpConf.meter.id());
+                    .setIpDscp((byte) 0)
+                    .meter(grpConf.meter.id());
                 flowrulesTobeInstalled.add(
                     DefaultFlowRule.builder()
                         .forTable(0)
@@ -538,23 +538,23 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                                 
                                 // user location changed
                                 if ((switchID_now != switchID) || (switchPort_now != switchPort)) {
-                                    try (PreparedStatement insertIntoLogLoc = connection.prepareStatement(
-                                        "INSERT INTO authenLog " +
-                                        "(user_id, mac, ip, switch_id, switch_port, auth_state) " +
-                                        "VALUES (?, ?, ?, ?, ?, ?)"
-                                    )) {
-                                        insertIntoLogLoc.setInt(1, userID);
-                                        insertIntoLogLoc.setString(2, srcMac.toString());
-                                        insertIntoLogLoc.setString(3, srcIp.toString());
-                                        insertIntoLogLoc.setInt(4, switchID_now);
-                                        insertIntoLogLoc.setInt(5, switchPort_now);
-                                        insertIntoLogLoc.setString(6,
-                                            String.format("LOC %d/%d->%d/%d",
-                                                switchID, switchPort, switchID_now, switchPort_now));
-                                        insertIntoLogLoc.executeUpdate();
-                                    } catch (SQLException e) {
-                                        log.info("[SQLException] (@9002) state: " + e.getSQLState() + " message: " + e.getMessage());
-                                    }
+                                    // try (PreparedStatement insertIntoLogLoc = connection.prepareStatement(
+                                    //     "INSERT INTO authenLog " +
+                                    //     "(user_id, mac, ip, switch_id, switch_port, auth_state) " +
+                                    //     "VALUES (?, ?, ?, ?, ?, ?)"
+                                    // )) {
+                                    //     insertIntoLogLoc.setInt(1, userID);
+                                    //     insertIntoLogLoc.setString(2, srcMac.toString());
+                                    //     insertIntoLogLoc.setString(3, srcIp.toString());
+                                    //     insertIntoLogLoc.setInt(4, switchID_now);
+                                    //     insertIntoLogLoc.setInt(5, switchPort_now);
+                                    //     insertIntoLogLoc.setString(6,
+                                    //         String.format("LOC %d/%d->%d/%d",
+                                    //             switchID, switchPort, switchID_now, switchPort_now));
+                                    //     insertIntoLogLoc.executeUpdate();
+                                    // } catch (SQLException e) {
+                                    //     log.info("[SQLException] (@9002) state: " + e.getSQLState() + " message: " + e.getMessage());
+                                    // }
 
                                     // purge dirty flowrules
                                     List<FlowRule> flowsToBeDel = supFlowrules.get(srcMac);
@@ -592,7 +592,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                                         insertIntoLogPktIn.setString(3, srcIp.toString());
                                         insertIntoLogPktIn.setInt(4, switchID_now);
                                         insertIntoLogPktIn.setInt(5, switchPort_now);
-                                        insertIntoLogPktIn.setString(6, "RuleInstalled");
+                                        insertIntoLogPktIn.setString(6, "NETACCESS");
                                         insertIntoLogPktIn.executeUpdate();
                                     } catch (SQLException e) {
                                         log.info("[SQLException] (@9001) state: " + e.getSQLState() + " message: " + e.getMessage());
@@ -726,7 +726,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                         .withSelector(selectorBuilderOut.build())
                         .withTreatment(treatmentBuilderOut.build())
                         .withPriority(FLOWPRIORITY)
-                        .withHardTimeout(timeout)
+                        .makePermanent()
                         .fromApp(appId)
                         .build()
                 );
@@ -737,7 +737,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                         .withSelector(selectorBuilderIn.build())
                         .withTreatment(treatmentBuilderIn.build())
                         .withPriority(FLOWPRIORITY)
-                        .withHardTimeout(timeout)
+                        .makePermanent()
                         .fromApp(appId)
                         .build()
                 );
@@ -754,7 +754,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                     .withSelector(selectorBuilderOut.build())
                     .withTreatment(lastTreatmentBuilderOut.build())
                     .withPriority(FLOWPRIORITY)
-                    .withHardTimeout(timeout)
+                    .makePermanent()
                     .fromApp(appId)
                     .build()
             );
@@ -765,7 +765,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                     .withSelector(selectorBuilderIn.build())
                     .withTreatment(lastTreatmentBuilderIn.build())
                     .withPriority(FLOWPRIORITY)
-                    .withHardTimeout(timeout)
+                    .makePermanent()
                     .fromApp(appId)
                     .build()
             );
@@ -929,22 +929,25 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                 }
 
                 // log for each authentication event
-                try (
-                    PreparedStatement insertIntoLog = connection.prepareStatement(
-                        "INSERT INTO authenLog " +
-                        "(user_id, mac, ip, switch_id, switch_port, auth_state) " +
-                        "VALUES (?, ?, ?, ?, ?, ?)")
-                ) {
-                    insertIntoLog.setInt(1, userID);
-                    insertIntoLog.setString(2, supMac.toString());
-                    insertIntoLog.setString(3, null);
-                    insertIntoLog.setInt(4, switchID);
-                    insertIntoLog.setInt(5, (int) connectp.port().toLong());
-                    insertIntoLog.setString(6, state);
-                    insertIntoLog.executeUpdate();
-                } catch (SQLException e) {
-                    log.info("[SQLException] (@8004) state: " + e.getSQLState() + " message: " + e.getMessage());
+                if (state.equals("AUTHORIZED_STATE") || state.equals("UNAUTHORIZED_STATE")) {
+                    try (
+                        PreparedStatement insertIntoLog = connection.prepareStatement(
+                            "INSERT INTO authenLog " +
+                            "(user_id, mac, ip, switch_id, switch_port, auth_state) " +
+                            "VALUES (?, ?, ?, ?, ?, ?)")
+                    ) {
+                        insertIntoLog.setInt(1, userID);
+                        insertIntoLog.setString(2, supMac.toString());
+                        insertIntoLog.setString(3, null);
+                        insertIntoLog.setInt(4, switchID);
+                        insertIntoLog.setInt(5, (int) connectp.port().toLong());
+                        insertIntoLog.setString(6, state);
+                        insertIntoLog.executeUpdate();
+                    } catch (SQLException e) {
+                        log.info("[SQLException] (@8004) state: " + e.getSQLState() + " message: " + e.getMessage());
+                    }
                 }
+
 
                 /**
                  * Some user was authenticated.
@@ -1148,8 +1151,8 @@ public class Authenticator8021xManager implements Authenticator8021xService {
         }
 
         private void handleFlowRemoved(FlowEntry ruleEntry) {
-            // log.info("Flow removed device={}, selector={}, treatment={}, reason={}",
-            //     ruleEntry.deviceId(), ruleEntry.selector(), ruleEntry.treatment(), ruleEntry.reason());
+            log.info("Flow removed device={}, selector={}, treatment={}, reason={}",
+                ruleEntry.deviceId(), ruleEntry.selector(), ruleEntry.treatment(), ruleEntry.reason());
 
             try (Connection connection = DriverManager.getConnection(dbUrl, dbUser, dbPassword)){
                 List <User> vips = new ArrayList<>();
@@ -1175,24 +1178,28 @@ public class Authenticator8021xManager implements Authenticator8021xService {
 
                 EthCriterion ethCrit = (EthCriterion) ruleEntry.selector().getCriterion(Type.ETH_SRC);
                 MacAddress srcMac = (ethCrit == null) ? null : ethCrit.mac();
+                
                 DeviceId devId = ruleEntry.deviceId();
-                for (User vip : vips) {
-                    if (vip.devId.equals(devId) && vip.mac.equals(srcMac)) {
-                        log.info("Device '{}' authentication timeout!", srcMac);
-
-                        try (
-                            PreparedStatement pStmt = connection.prepareStatement(
-                                "DELETE FROM authorizedDevice " +
-                                "WHERE mac = ?"
-                            )
-                        ) {
-                            pStmt.setString(1, srcMac.toString());
-                            pStmt.executeUpdate();
-                        } catch (SQLException e) {
-                            log.info("[SQLException] (@5101) state: " + e.getSQLState() + " message: " + e.getMessage());
+                if (ruleEntry.selector().getCriterion(Type.IPV4_DST) == null) {
+                    for (User vip : vips) {
+                        if (vip.devId.equals(devId) && vip.mac.equals(srcMac)) {
+                            log.info("Device '{}' authentication timeout!", srcMac);
+    
+                            try (
+                                PreparedStatement pStmt = connection.prepareStatement(
+                                    "DELETE FROM authorizedDevice " +
+                                    "WHERE mac = ?"
+                                )
+                            ) {
+                                pStmt.setString(1, srcMac.toString());
+                                pStmt.executeUpdate();
+                            } catch (SQLException e) {
+                                log.info("[SQLException] (@5101) state: " + e.getSQLState() + " message: " + e.getMessage());
+                            }
                         }
                     }
                 }
+                aaaManager.removeAuthenticationStateByMac(srcMac);
             } catch (SQLException e) {
                 log.info("[SQLException] (@FlowRuleListener) state: " + e.getSQLState() + " message: " + e.getMessage());
             }
