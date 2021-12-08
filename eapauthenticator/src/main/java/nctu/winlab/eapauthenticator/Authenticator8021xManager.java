@@ -38,6 +38,7 @@ import org.onosproject.net.packet.PacketService;
 import org.onosproject.net.packet.PacketProcessor;
 import org.onosproject.net.packet.PacketContext;
 import org.onosproject.net.packet.InboundPacket;
+import org.onosproject.dhcp.DhcpService;
 import org.onosproject.core.CoreService;
 import org.onosproject.core.ApplicationId;
 import static org.onlab.util.Tools.get;
@@ -165,6 +166,8 @@ public class Authenticator8021xManager implements Authenticator8021xService {
     @Reference(cardinality = ReferenceCardinality.MANDATORY)
     protected CoreService coreService;
 
+    protected DhcpService dhcpService;
+
     @Reference(cardinality = ReferenceCardinality.MANDATORY)
     protected FlowRuleService flowRuleService;
 
@@ -198,6 +201,8 @@ public class Authenticator8021xManager implements Authenticator8021xService {
             log.info("Group '{}' initialing...", grp);
             groupInit(grp);
         }
+
+        dhcpService.getLeaseTime();
 
         log.info("Started");
     }
@@ -574,7 +579,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                                     // } catch (SQLException e) {
                                     //     log.info("[SQLException] (@9002) state: " + e.getSQLState() + " message: " + e.getMessage());
                                     // }
-                                    log.info("Device {} location changed!!! From {}/{} to {}/{}",
+                                    log.info("Device {} location changed from {}/{} to {}/{}",
                                         srcMac, switchID, switchPort, switchID_now, switchPort_now);
 
                                     // purge dirty flowrules
@@ -1123,12 +1128,9 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                 .withSelector(selectorBuilder.build())
                 .withTreatment(treatmentBuilder.build())
                 .withPriority(FLOWPRIORITY)
-                .fromApp(appId);
-            if (softHard) {
-                flowbuilder.makeTemporary(loginTimeout);
-            } else {
-                flowbuilder.withHardTimeout(loginTimeout);
-            }
+                .fromApp(appId)
+                .makePermanent();
+            
             flowRuleService.applyFlowRules(flowbuilder.build());
             // supFlowrules.add(supMac, flow);
         }
@@ -1201,7 +1203,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                 MacAddress srcMac = (ethCrit == null) ? null : ethCrit.mac();
                 
                 DeviceId devId = ruleEntry.deviceId();
-                if (ruleEntry.selector().getCriterion(Type.IPV4_DST) == null) {
+                if ((ruleEntry.selector().getCriterion(Type.IPV4_DST) == null) && (ruleEntry.selector().getCriterion(Type.IP_PROTO) == null)) {
                     for (User vip : vips) {
                         if (vip.devId.equals(devId) && vip.mac.equals(srcMac)) {
                             log.info("Device '{}' authentication timeout!", srcMac);
@@ -1219,8 +1221,8 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                             }
                         }
                     }
+                    aaaManager.removeAuthenticationStateByMac(srcMac);
                 }
-                aaaManager.removeAuthenticationStateByMac(srcMac);
             } catch (SQLException e) {
                 log.info("[SQLException] (@FlowRuleListener) state: " + e.getSQLState() + " message: " + e.getMessage());
             }
