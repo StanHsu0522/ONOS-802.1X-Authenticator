@@ -99,6 +99,14 @@
             <artifactId>mysql-connector-java</artifactId>
             <version>${mysqlConnectorJavaVersion}</version>
         </dependency>
+
+        <!-- https://mvnrepository.com/artifact/org.onosproject/onos-app-dhcp-api -->
+        <!-- <dependency>
+            <groupId>org.onosproject</groupId>
+            <artifactId>onos-app-dhcp-api</artifactId>
+            <version>1.6.0</version>
+            <scope>provided</scope>
+        </dependency> -->
     </dependencies>
 
     <build>

@@ -38,7 +38,6 @@ import org.onosproject.net.packet.PacketService;
 import org.onosproject.net.packet.PacketProcessor;
 import org.onosproject.net.packet.PacketContext;
 import org.onosproject.net.packet.InboundPacket;
-import org.onosproject.dhcp.DhcpService;
 import org.onosproject.core.CoreService;
 import org.onosproject.core.ApplicationId;
 import static org.onlab.util.Tools.get;
@@ -166,7 +165,8 @@ public class Authenticator8021xManager implements Authenticator8021xService {
     @Reference(cardinality = ReferenceCardinality.MANDATORY)
     protected CoreService coreService;
 
-    protected DhcpService dhcpService;
+    // @Reference(cardinality = ReferenceCardinality.MANDATORY)
+    // protected DhcpService dhcpService;
 
     @Reference(cardinality = ReferenceCardinality.MANDATORY)
     protected FlowRuleService flowRuleService;
@@ -201,8 +201,6 @@ public class Authenticator8021xManager implements Authenticator8021xService {
             log.info("Group '{}' initialing...", grp);
             groupInit(grp);
         }
-
-        dhcpService.getLeaseTime();
 
         log.info("Started");
     }
