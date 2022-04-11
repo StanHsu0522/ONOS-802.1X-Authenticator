@@ -616,7 +616,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                                         insertIntoLogPktIn.setString(3, srcIp.toString());
                                         insertIntoLogPktIn.setInt(4, switchID_now);
                                         insertIntoLogPktIn.setInt(5, switchPort_now);
-                                        insertIntoLogPktIn.setString(6, "NETACCESS");
+                                        insertIntoLogPktIn.setString(6, "NET_ACCESS");
                                         insertIntoLogPktIn.executeUpdate();
                                     } catch (SQLException e) {
                                         log.info("[SQLException] (@9001) state: " + e.getSQLState() + " message: " + e.getMessage());
