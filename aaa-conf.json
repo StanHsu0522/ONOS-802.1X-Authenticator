@@ -4,7 +4,8 @@
 			"AAA":{
 				"radiusSecret": "winlab_radius_share_secret",
 				"radiusIp": "172.17.0.2",
-				"radiusServerPort": "1812"
+				"radiusServerPort": "1812",
+				"bindPort": "9999"
 			}
 		}
 	}

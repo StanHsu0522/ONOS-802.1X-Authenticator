@@ -8,6 +8,6 @@ onos localhost app activate dhcp proxyarp
 
 onos-app localhost install! ~/sadis/app/target/sadis-app-5.1.0.oar
 sleep 3
-onos-app localhost install! ~/aaa/app/target/aaa-app-2.1.0.oar
+onos-app localhost install! ~/aaa_mod/app/target/aaa-app-2.1.0.oar
 sleep 3
 onos-app localhost install! ~/ONOS-802.1X-Authenticator/eapauthenticator/target/eapauthenticator-1.0-SNAPSHOT.oar

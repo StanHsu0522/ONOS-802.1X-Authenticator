@@ -37,15 +37,21 @@ import org.slf4j.LoggerFactory;
 import org.onosproject.net.packet.PacketService;
 import org.onosproject.net.packet.PacketProcessor;
 import org.onosproject.net.packet.PacketContext;
+import org.onosproject.net.packet.DefaultOutboundPacket;
 import org.onosproject.net.packet.InboundPacket;
+import org.onosproject.net.packet.OutboundPacket;
 import org.onosproject.core.CoreService;
 import org.onosproject.core.ApplicationId;
 import static org.onlab.util.Tools.get;
 
 import java.net.InetAddress;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.Dictionary;
+import java.util.HashMap;
 import java.util.Properties;
 import java.util.List;
+import java.util.Map;
 import java.util.Collection;
 import java.util.Set;
 import java.util.HashSet;
@@ -56,7 +62,10 @@ import java.util.Iterator;
 import java.util.Map.Entry;
 
 import org.onlab.packet.MacAddress;
+import org.onlab.packet.RADIUS;
+import org.onlab.packet.RADIUSAttribute;
 import org.onlab.packet.IpAddress;
+import org.onlab.packet.DeserializationException;
 import org.onlab.packet.Ethernet;
 import org.onlab.packet.IPv4;
 import org.onlab.packet.Ip4Prefix;
@@ -114,10 +123,21 @@ import com.mysql.cj.jdbc.Driver;
                 "someProperty=Some Default String Value",
             })
 public class Authenticator8021xManager implements Authenticator8021xService {
-    private static final String MONITORIP = "192.168.44.103";
-    private static final String GATEWAYMAC = "ea:e9:78:fb:fd:00";
-    private final ConnectPoint gwCp = ConnectPoint.fromString​("of:000078321bdf7000/10");
-    private final ConnectPoint monitorCp = ConnectPoint.fromString​("of:000078321bdf7000/9");
+
+    private static final String APP_NAME = "nctu.winlab.eapauthenticator";
+    private static final int UDP_HEADER_LENGTH = 8;
+    private static final int RADIUS_AUTH_PORT = 1812;
+    private static final int PASSWDERRLIMIT = 3;
+    private static final int PACKET_RECORD_TIMEOUT = 60;    // in second
+    private static final int BLOCKPERIOD = 180;             // in second
+    private static final int ERRRSTPERIOD = 60;             // in second
+    // private static final String MONITORIP = "192.168.44.103";
+    // private static final String GATEWAYMAC = "ea:e9:78:fb:fd:00";
+    private final ConnectPoint GATE_WAY_CONNECT_POINT = ConnectPoint.fromString​("of:000078321bdf7000/10");
+    // private final ConnectPoint MONITOR_CONNECT_POINT = ConnectPoint.fromString​("of:000078321bdf7000/9");
+    private static final ConnectPoint RADIUS_SERVER_CONNCECT_POINT = ConnectPoint.fromString​("of:000078321bdf7000/12");
+    // private static final ConnectPoint AP_AUTHENTICATOR_CONNCECT_POINT = ConnectPoint.fromString​("of:000078321bdf7000/11");
+    private static final ConnectPoint WIRELESS_CONNCECT_POINT = ConnectPoint.fromString​("of:000078321bdf4200/15");
 
     // Configure Flow Priority
     // private static final int FORBIDFLOWPRIORITY = 60001;
@@ -126,23 +146,12 @@ public class Authenticator8021xManager implements Authenticator8021xService {
     private static final int FORWARDINGPRIORITY = 50000;
     private static final int FORBIDDHCPFLOWPRIORITY = 40001;
 
-    private static final int PASSWDERRLIMIT = 3;
-    private static final int BLOCKPERIOD = 180;     // in second
-    private static final int ERRRSTPERIOD = 60;     // in second
-
     // mysql database parameter
     private String dbUrl = "jdbc:mysql://localhost:3306/SDN1X";
     private String dbUser = "winlab";
     private String dbPassword = "winlabisgood";
 
     private String someProperty;
-    private ApplicationId appId;
-    private final Logger log = LoggerFactory.getLogger(getClass());
-    private final SupplicantInstalledFlowrules supFlowrules = new SupplicantInstalledFlowrules();
-    private final AuthenticationEventListener authenticationEventHandler = new InternalAuthenticationEventListener();
-    private final FlowRuleListener flowRuleHandler = new InternalFlowRuleEventListener();
-    private final Authenticator8021xCommandImpl commandImpl = new Authenticator8021xCommandImpl();
-    private final ReactivePacketProcessor processor = new ReactivePacketProcessor();
 
     @Reference(cardinality = ReferenceCardinality.MANDATORY)
     protected ComponentConfigService cfgService;
@@ -165,9 +174,6 @@ public class Authenticator8021xManager implements Authenticator8021xService {
     @Reference(cardinality = ReferenceCardinality.MANDATORY)
     protected CoreService coreService;
 
-    // @Reference(cardinality = ReferenceCardinality.MANDATORY)
-    // protected DhcpService dhcpService;
-
     @Reference(cardinality = ReferenceCardinality.MANDATORY)
     protected FlowRuleService flowRuleService;
 
@@ -177,13 +183,27 @@ public class Authenticator8021xManager implements Authenticator8021xService {
     @Reference(cardinality = ReferenceCardinality.MANDATORY)
     protected MeterService meterService;
 
+    private ApplicationId appId;
+    private final Logger log = LoggerFactory.getLogger(getClass());
+    private final SupplicantInstalledFlowrules supFlowrules = new SupplicantInstalledFlowrules();
+    private final AuthenticationEventListener authenticationEventHandler = new InternalAuthenticationEventListener();
+    private final FlowRuleListener flowRuleHandler = new InternalFlowRuleEventListener();
+    private final Authenticator8021xCommandImpl commandImpl = new Authenticator8021xCommandImpl();
+
+    // our application-specific event handler for processing user packet-in
+    private final ReactivePacketProcessor reactiveProcessor = new ReactivePacketProcessor();
+
+    // our application-specific event handler for processing RADIUS packet
+    private final RadiusPacketProcessor radiusProcessor = new RadiusPacketProcessor();
+
     @Activate
     protected void activate() {
         // cfgService.registerProperties(getClass());
-        appId = coreService.registerApplication("nctu.winlab.eapauthenticator");
+        appId = coreService.registerApplication(APP_NAME);
         aaaManager.addListener(authenticationEventHandler);
         flowRuleService.addListener(flowRuleHandler);
-        packetService.addProcessor(processor, PacketProcessor.director(2));
+        packetService.addProcessor(radiusProcessor, PacketProcessor.director(3));
+        packetService.addProcessor(reactiveProcessor, PacketProcessor.director(4));
         requestIntercepts();
 
         // Nameless object for executing class static clause.
@@ -209,8 +229,9 @@ public class Authenticator8021xManager implements Authenticator8021xService {
     protected void deactivate() {
         cfgService.unregisterProperties(getClass(), false);
         aaaManager.removeListener(authenticationEventHandler);
-        packetService.removeProcessor(processor);
         withdrawIntercepts();
+        packetService.removeProcessor(radiusProcessor);
+        packetService.removeProcessor(reactiveProcessor);
         flowRuleService.removeFlowRulesById(appId);
 
         log.info("Stopped");
@@ -357,23 +378,23 @@ public class Authenticator8021xManager implements Authenticator8021xService {
             log.info("[SQLException] (@6000) state: " + e.getSQLState() + " message: " + e.getMessage());
         }
 
-        // group meter submition
-        Collection<Band> meterBands = new ArrayList<>();
-        meterBands.add(
-            DefaultBand.builder()
-                .withRate(grpConf.meterRate)
-                .ofType(Band.Type.DROP)
-                .burstSize(grpConf.meterRate / 100)
-                .build()
-        );
-        MeterRequest meterReq = DefaultMeterRequest.builder()
-            .forDevice(gwCp.deviceId())
-            .fromApp(appId)
-            .withBands(meterBands)
-            .withUnit(Meter.Unit.KB_PER_SEC)
-            .burst()
-            .add();
-        grpConf.meter = meterService.submit(meterReq);
+        // // group meter submition
+        // Collection<Band> meterBands = new ArrayList<>();
+        // meterBands.add(
+        //     DefaultBand.builder()
+        //         .withRate(grpConf.meterRate)
+        //         .ofType(Band.Type.DROP)
+        //         .burstSize(grpConf.meterRate / 100)
+        //         .build()
+        // );
+        // MeterRequest meterReq = DefaultMeterRequest.builder()
+        //     .forDevice(GATE_WAY_CONNECT_POINT.deviceId())
+        //     .fromApp(appId)
+        //     .withBands(meterBands)
+        //     .withUnit(Meter.Unit.KB_PER_SEC)
+        //     .burst()
+        //     .add();
+        // grpConf.meter = meterService.submit(meterReq);
 
         /**
          * Install two types of flow rules
@@ -386,10 +407,10 @@ public class Authenticator8021xManager implements Authenticator8021xService {
             .matchEthType(Ethernet.TYPE_IPV4)
             .matchIPDscp​(grpConf.dscp);
         for (DeviceId devId : allDevices) {
-            if (!devId.equals(gwCp.deviceId())) {
+            if (!devId.equals(GATE_WAY_CONNECT_POINT.deviceId())) {
 
                 // find a path from this switch to the gateway
-                Path path = calculatePath(ConnectPoint.fromString​(devId.toString().concat("/1")), gwCp);
+                Path path = calculatePath(ConnectPoint.fromString​(devId.toString().concat("/1")), GATE_WAY_CONNECT_POINT);
                 if (path == null) {
                     log.info("Error: (@6001)");
                     return;
@@ -409,16 +430,16 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                         .build()
                 );
             } else {
-                // check meter is added
-                while (true) {
-                    if (meterService.getMeter(gwCp.deviceId(), grpConf.meter.id()).state() == MeterState.ADDED) {
-                        break;
-                    }
-                }
+                // // check meter is added
+                // while (true) {
+                //     if (meterService.getMeter(GATE_WAY_CONNECT_POINT.deviceId(), grpConf.meter.id()).state() == MeterState.ADDED) {
+                //         break;
+                //     }
+                // }
                 TrafficTreatment.Builder treatmentBuilder = DefaultTrafficTreatment.builder()
-                    .setOutput(gwCp.port())
-                    .setIpDscp((byte) 0)
-                    .meter(grpConf.meter.id());
+                    .setOutput(GATE_WAY_CONNECT_POINT.port())
+                    .setIpDscp((byte) 0);
+                    // .meter(grpConf.meter.id());
                 flowrulesTobeInstalled.add(
                     DefaultFlowRule.builder()
                         .forTable(0)
@@ -474,7 +495,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
             flowrulesTobeInstalled.add(
                 DefaultFlowRule.builder()
                     .forTable(0)
-                    .forDevice(gwCp.deviceId())
+                    .forDevice(GATE_WAY_CONNECT_POINT.deviceId())
                     .withSelector(selectorFrbBuilder.build())
                     .withTreatment(treatmentFrbBuilder.build())
                     .withPriority(FORBIDFORWARDINGPRIORITY)
@@ -488,6 +509,192 @@ public class Authenticator8021xManager implements Authenticator8021xService {
         // List to arrray casting.
         flowrulesArr = flowrulesTobeInstalled.toArray(flowrulesArr);
         flowRuleService.applyFlowRules(flowrulesArr);
+    }
+
+    private class RadiusPacketProcessor implements PacketProcessor {
+
+        // Packet list for matching access-accept with access-request
+        private Map<Byte, PacketInfo>outgoingPacketMap;
+
+        // for matching ap with its outgoing packet-list
+        private Map<MacAddress, Map<Byte, PacketInfo>> authenticatorMap = new HashMap<>();
+
+        // for recording authenticator's location
+        private Map<MacAddress, ConnectPoint> authenticatorLoc = new HashMap<>();
+
+        @Override
+        public void process(PacketContext context) {
+
+            if (context.isHandled()) {
+                return;
+            }
+
+            // Extract the original Ethernet frame from the packet information
+            InboundPacket pkt = context.inPacket();
+            Ethernet ethPkt = pkt.parsed();
+            if (ethPkt == null) {
+                return;
+            }
+
+            MacAddress srcMac = ethPkt.getSourceMAC();
+            MacAddress dstMac = ethPkt.getDestinationMAC();
+
+            if (ethPkt.getEtherType() == Ethernet.TYPE_IPV4) {
+                IPv4 ip4Pkt = (IPv4) ethPkt.getPayload();
+                IpAddress srcIp = IpAddress.valueOf(ip4Pkt.getSourceAddress());
+                IpAddress dstIp = IpAddress.valueOf(ip4Pkt.getDestinationAddress());
+
+                if (ip4Pkt.getProtocol() == IPv4.PROTOCOL_UDP) {
+                    UDP udpPkt = (UDP) ip4Pkt.getPayload();
+                    int srcPort = udpPkt.getSourcePort();
+                    int dstPort = udpPkt.getDestinationPort();
+
+                    // RADIUS packet
+                    if (srcPort == RADIUS_AUTH_PORT || dstPort == RADIUS_AUTH_PORT) {
+
+                        // block this context from other processor to process
+                        context.block();
+
+                        // Parsing RADIUS packet
+                        // Serialize udp packet first, then deserialize into RADIUS packet
+                        RADIUS radiusPkt = null;
+                        ConnectPoint apCp = null;
+                        byte[] udpByte = udpPkt.serialize();
+                        boolean outgoing = false;
+                        try {
+                            radiusPkt = RADIUS.deserializer()
+                                                .deserialize(udpByte,
+                                                        UDP_HEADER_LENGTH,
+                                                        udpByte.length - UDP_HEADER_LENGTH);
+                        } catch (DeserializationException dex) {
+                            log.error("Cannot deserialize packet", dex);
+                            return;
+                        }
+                        log.info("Got RADIUS Packet: {}:{}->{}:{}",srcIp, srcPort, dstIp, dstPort);
+
+                        // Incoming packet (AP Authenticator <-- RADIUS server)
+                        if (srcPort == RADIUS_AUTH_PORT) {
+                            outgoing = false;
+                            outgoingPacketMap = authenticatorMap.get(dstMac);
+                            apCp = authenticatorLoc.get(dstMac);
+                            if (outgoingPacketMap == null) {
+                                log.warn("Can't find corresponding AP's information");
+                            }
+                        }
+
+                        // Outgoing packet (AP Authenticator --> RADIUS server)
+                        else if (dstPort == RADIUS_AUTH_PORT) {
+                            outgoing = true;
+                            outgoingPacketMap = authenticatorMap.get(srcMac);
+                            apCp = authenticatorLoc.get(srcMac);
+                            if (outgoingPacketMap == null) {
+                                authenticatorMap.put(srcMac, new HashMap<>());
+                                outgoingPacketMap = authenticatorMap.get(srcMac);
+                            }
+                            if (apCp == null) {
+                                authenticatorLoc.put(srcMac, context.inPacket().receivedFrom());
+                            }
+
+                            // update authenticator's location
+                            if (apCp != context.inPacket().receivedFrom()) {
+                                authenticatorLoc.replace(srcMac, context.inPacket().receivedFrom());
+                            }
+                        }
+
+                        byte pktId = radiusPkt.getIdentifier();
+                        switch (radiusPkt.getCode()) {
+                            case RADIUS.RADIUS_CODE_ACCESS_REQUEST:
+                                RADIUSAttribute radiusAttrUserName =
+                                radiusPkt.getAttribute(RADIUSAttribute.RADIUS_ATTR_USERNAME);
+                                String user_name = null;
+                                if (radiusAttrUserName != null) {
+                                    user_name = new String(radiusAttrUserName.getValue(), StandardCharsets.UTF_8);
+                                }
+                                RADIUSAttribute radiusAttrCallingStationId =
+                                        radiusPkt.getAttribute(RADIUSAttribute.RADIUS_ATTR_CALLING_STATION_ID);
+                                String calling_station_id = null;
+                                if (radiusAttrCallingStationId != null) {
+                                    calling_station_id = new String(radiusAttrCallingStationId.getValue(), StandardCharsets.UTF_8);
+                                    calling_station_id = calling_station_id.replace('-', ':');
+                                }
+                                log.info("ACCESS_REQUEST [radius_id={}, user_name={}, mac_addr={}]", pktId, user_name, calling_station_id);
+                                outgoingPacketMap.put(pktId, new PacketInfo(calling_station_id, user_name, pktId));
+                                updateDb(MacAddress.valueOf(calling_station_id), WIRELESS_CONNCECT_POINT, user_name, "STARTED_STATE");
+                                break;
+
+                            case RADIUS.RADIUS_CODE_ACCESS_CHALLENGE:
+                                log.info("ACCESS_CHALLENGE [radius_id={}]", pktId);
+                                outgoingPacketMap.remove(pktId);
+                                break;
+
+                            case RADIUS.RADIUS_CODE_ACCESS_ACCEPT:
+                                PacketInfo supAccepted = outgoingPacketMap.get(pktId);
+                                if (supAccepted == null) {
+                                    log.warn("unkown user has been authorized!");
+                                }
+                                else {
+                                    outgoingPacketMap.remove(pktId);
+                                    log.info("User '{}' ({}) has been authorized!",
+                                            supAccepted.user_name, supAccepted.mac);
+                                    updateDb(supAccepted.mac, WIRELESS_CONNCECT_POINT, supAccepted.user_name, "AUTHORIZED_STATE");
+                                }
+                                break;
+
+                            case RADIUS.RADIUS_CODE_ACCESS_REJECT:
+                                PacketInfo supRejected = outgoingPacketMap.get(pktId);
+                                if (supRejected == null) {
+                                    log.info("unkown user has benn rejected!");
+                                }
+                                else {
+                                    outgoingPacketMap.remove(pktId);
+                                    log.info("User '{}' ({}) has been rejected!",
+                                            supRejected.user_name, supRejected.mac);
+                                    updateDb(supRejected.mac, WIRELESS_CONNCECT_POINT, supRejected.user_name, "UNAUTHORIZED_STATE");
+                                }
+                                break;
+                        }
+
+                        if (outgoing) {
+                            log.info("Relay packet to RADIUS server at {}", RADIUS_SERVER_CONNCECT_POINT);
+                            sendPacketToDataPlane(ethPkt, RADIUS_SERVER_CONNCECT_POINT);
+                        }
+                        else {
+                            log.info("Relay packet to AP at {}", apCp);
+                            sendPacketToDataPlane(ethPkt, apCp);
+                        }
+
+                        // Cleaning up stale packet record
+                        Collection<PacketInfo> packets = outgoingPacketMap.values();
+                        for (Iterator<PacketInfo> itp = packets.iterator(); itp.hasNext();) {
+                            Calendar cal = Calendar.getInstance();
+                            PacketInfo pktInfo = itp.next();
+                            if (pktInfo.timestamp <= cal.getTimeInMillis()) {
+                                log.info("Cleaning up request packet ID {}", pktInfo.id);
+                                itp.remove();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        private class PacketInfo {
+            MacAddress mac;         // RADIUS Calling_Station_Id Attribute
+            String user_name;       // RADIUS User_Name Attribute
+            byte id;                // RADIUS identifier
+            long timestamp;
+    
+            PacketInfo(String mac, String user_name, byte id) {
+                this.mac = MacAddress.valueOf(mac);
+                this.user_name = user_name;
+                this.id = id;
+    
+                // entry-timeout
+                Calendar cal = Calendar.getInstance();
+                cal.add(Calendar.SECOND, PACKET_RECORD_TIMEOUT);
+                timestamp = cal.getTimeInMillis();
+            }
+        }    
     }
 
     private class ReactivePacketProcessor implements PacketProcessor {
@@ -582,10 +789,15 @@ public class Authenticator8021xManager implements Authenticator8021xService {
 
                                     // purge dirty flowrules
                                     List<FlowRule> flowsToBeDel = supFlowrules.get(srcMac);
-                                    FlowRule[] flowrulesArr = new FlowRule[flowsToBeDel.size()];
-                                    // List to array casting.
-                                    flowrulesArr = flowsToBeDel.toArray(flowrulesArr);
-                                    flowRuleService.removeFlowRules(flowrulesArr);
+                                    if (flowsToBeDel != null) {
+                                        FlowRule[] flowrulesArr = new FlowRule[flowsToBeDel.size()];
+                                        // List to array casting.
+                                        flowrulesArr = flowsToBeDel.toArray(flowrulesArr);
+                                        flowRuleService.removeFlowRules(flowrulesArr);
+                                    }
+                                    else {
+                                        log.warn("Can't find old flow rules.");
+                                    }
                                 }
 
                                 // update authorized record
@@ -649,9 +861,9 @@ public class Authenticator8021xManager implements Authenticator8021xService {
 
         List<FlowRule> flowrules = new ArrayList<>();
 
-        Path path = calculatePath(clientCp, gwCp);
+        Path path = calculatePath(clientCp, GATE_WAY_CONNECT_POINT);
         if (path == null) {
-            log.info("Error: @normalPkt() Can't get path to gateway!");
+            log.error("Error: @normalPkt() Can't get path to gateway!");
             return;
         } else {
             TrafficSelector.Builder selectorBuilderIn = DefaultTrafficSelector.builder()
@@ -718,82 +930,82 @@ public class Authenticator8021xManager implements Authenticator8021xService {
             flowrules.add(flowruleBuilderRear.build());
         }
 
-        // Install path between monitor (plot client) and supplicant (plot server).
-        Path monitorPath = calculatePath(clientCp, monitorCp);
-        if (monitorPath == null) {
-            log.info("Error: @normalPkt() Can't get path to monitor!");
-            return;
-        } else {
-            TrafficSelector.Builder selectorBuilderOut = DefaultTrafficSelector.builder()
-                .matchEthSrc(mac)
-                .matchEthType(Ethernet.TYPE_IPV4)
-                .matchIPDst(IpPrefix.valueOf(
-                        IpAddress.valueOf(MONITORIP),
-                        Ip4Prefix.MAX_INET_MASK_LENGTH)
-                    );
-            TrafficSelector.Builder selectorBuilderIn = DefaultTrafficSelector.builder()
-                .matchEthDst(mac)
-                .matchEthType(Ethernet.TYPE_IPV4)
-                .matchIPSrc(IpPrefix.valueOf(
-                        IpAddress.valueOf(MONITORIP),
-                        Ip4Prefix.MAX_INET_MASK_LENGTH)
-                    );
-            for (Link link : path.links()) {
-                TrafficTreatment.Builder treatmentBuilderOut = DefaultTrafficTreatment.builder()
-                    .setOutput(link.src().port());
-                TrafficTreatment.Builder treatmentBuilderIn = DefaultTrafficTreatment.builder()
-                    .setOutput(link.dst().port());
-                flowrules.add(
-                    DefaultFlowRule.builder()
-                        .forTable(0)
-                        .forDevice(link.src().deviceId())
-                        .withSelector(selectorBuilderOut.build())
-                        .withTreatment(treatmentBuilderOut.build())
-                        .withPriority(FLOWPRIORITY)
-                        .makePermanent()
-                        .fromApp(appId)
-                        .build()
-                );
-                flowrules.add(
-                    DefaultFlowRule.builder()
-                        .forTable(0)
-                        .forDevice(link.dst().deviceId())
-                        .withSelector(selectorBuilderIn.build())
-                        .withTreatment(treatmentBuilderIn.build())
-                        .withPriority(FLOWPRIORITY)
-                        .makePermanent()
-                        .fromApp(appId)
-                        .build()
-                );
-            }
-            // Last device (clientCp & monitorCp)
-            TrafficTreatment.Builder lastTreatmentBuilderOut = DefaultTrafficTreatment.builder()
-                .setOutput(monitorCp.port());
-            TrafficTreatment.Builder lastTreatmentBuilderIn = DefaultTrafficTreatment.builder()
-                .setOutput(clientCp.port());
-            flowrules.add(
-                DefaultFlowRule.builder()
-                    .forTable(0)
-                    .forDevice(monitorCp.deviceId())
-                    .withSelector(selectorBuilderOut.build())
-                    .withTreatment(lastTreatmentBuilderOut.build())
-                    .withPriority(FLOWPRIORITY)
-                    .makePermanent()
-                    .fromApp(appId)
-                    .build()
-            );
-            flowrules.add(
-                DefaultFlowRule.builder()
-                    .forTable(0)
-                    .forDevice(clientCp.deviceId())
-                    .withSelector(selectorBuilderIn.build())
-                    .withTreatment(lastTreatmentBuilderIn.build())
-                    .withPriority(FLOWPRIORITY)
-                    .makePermanent()
-                    .fromApp(appId)
-                    .build()
-            );
-        }
+        // // Install path between monitor (plot client) and supplicant (plot server).
+        // Path monitorPath = calculatePath(clientCp, MONITOR_CONNECT_POINT);
+        // if (monitorPath == null) {
+        //     log.info("Error: @normalPkt() Can't get path to monitor!");
+        //     return;
+        // } else {
+        //     TrafficSelector.Builder selectorBuilderOut = DefaultTrafficSelector.builder()
+        //         .matchEthSrc(mac)
+        //         .matchEthType(Ethernet.TYPE_IPV4)
+        //         .matchIPDst(IpPrefix.valueOf(
+        //                 IpAddress.valueOf(MONITORIP),
+        //                 Ip4Prefix.MAX_INET_MASK_LENGTH)
+        //             );
+        //     TrafficSelector.Builder selectorBuilderIn = DefaultTrafficSelector.builder()
+        //         .matchEthDst(mac)
+        //         .matchEthType(Ethernet.TYPE_IPV4)
+        //         .matchIPSrc(IpPrefix.valueOf(
+        //                 IpAddress.valueOf(MONITORIP),
+        //                 Ip4Prefix.MAX_INET_MASK_LENGTH)
+        //             );
+        //     for (Link link : path.links()) {
+        //         TrafficTreatment.Builder treatmentBuilderOut = DefaultTrafficTreatment.builder()
+        //             .setOutput(link.src().port());
+        //         TrafficTreatment.Builder treatmentBuilderIn = DefaultTrafficTreatment.builder()
+        //             .setOutput(link.dst().port());
+        //         flowrules.add(
+        //             DefaultFlowRule.builder()
+        //                 .forTable(0)
+        //                 .forDevice(link.src().deviceId())
+        //                 .withSelector(selectorBuilderOut.build())
+        //                 .withTreatment(treatmentBuilderOut.build())
+        //                 .withPriority(FLOWPRIORITY)
+        //                 .makePermanent()
+        //                 .fromApp(appId)
+        //                 .build()
+        //         );
+        //         flowrules.add(
+        //             DefaultFlowRule.builder()
+        //                 .forTable(0)
+        //                 .forDevice(link.dst().deviceId())
+        //                 .withSelector(selectorBuilderIn.build())
+        //                 .withTreatment(treatmentBuilderIn.build())
+        //                 .withPriority(FLOWPRIORITY)
+        //                 .makePermanent()
+        //                 .fromApp(appId)
+        //                 .build()
+        //         );
+        //     }
+        //     // Last device (clientCp & MONITOR_CONNECT_POINT)
+        //     TrafficTreatment.Builder lastTreatmentBuilderOut = DefaultTrafficTreatment.builder()
+        //         .setOutput(MONITOR_CONNECT_POINT.port());
+        //     TrafficTreatment.Builder lastTreatmentBuilderIn = DefaultTrafficTreatment.builder()
+        //         .setOutput(clientCp.port());
+        //     flowrules.add(
+        //         DefaultFlowRule.builder()
+        //             .forTable(0)
+        //             .forDevice(MONITOR_CONNECT_POINT.deviceId())
+        //             .withSelector(selectorBuilderOut.build())
+        //             .withTreatment(lastTreatmentBuilderOut.build())
+        //             .withPriority(FLOWPRIORITY)
+        //             .makePermanent()
+        //             .fromApp(appId)
+        //             .build()
+        //     );
+        //     flowrules.add(
+        //         DefaultFlowRule.builder()
+        //             .forTable(0)
+        //             .forDevice(clientCp.deviceId())
+        //             .withSelector(selectorBuilderIn.build())
+        //             .withTreatment(lastTreatmentBuilderIn.build())
+        //             .withPriority(FLOWPRIORITY)
+        //             .makePermanent()
+        //             .fromApp(appId)
+        //             .build()
+        //     );
+        // }
 
         FlowRule[] flowrulesArr = new FlowRule[flowrules.size()];
         // List to array casting.
@@ -850,9 +1062,313 @@ public class Authenticator8021xManager implements Authenticator8021xService {
         packetService.cancelPackets(selector.build(), PacketPriority.REACTIVE, appId);
     }
 
+    /**
+     * Send the ethernet packet to the authenticator or RADIUS server.
+     * 
+     * @param ethernetPkt
+     * @param coonectPt
+     */
+    private void sendPacketToDataPlane(Ethernet ethernetPkt, ConnectPoint coonectPt) {
+        TrafficTreatment treatment = DefaultTrafficTreatment.builder().setOutput(coonectPt.port()).build();
+        OutboundPacket packet = new DefaultOutboundPacket(coonectPt.deviceId(),
+                                                          treatment, ByteBuffer.wrap(ethernetPkt.serialize()));
+        packetService.emit(packet);
+    }
+
     private void packetOut(PacketContext context, PortNumber portNumber) {
         context.treatmentBuilder().setOutput(portNumber);
         context.send();
+    }
+
+    /**
+    * Allow DHCP.
+    * @param supMac
+    * @param cp
+    * @param loginTimeout
+    */
+    private void dhcpAllow(MacAddress supMac, ConnectPoint cp, int loginTimeout, boolean softHard) {
+        log.info("enter @ dhcpAllow()");
+        TrafficSelector.Builder selectorBuilder = DefaultTrafficSelector.builder()
+            .matchEthSrc(supMac)
+            .matchEthType(Ethernet.TYPE_IPV4)
+            .matchIPProtocol(IPv4.PROTOCOL_UDP)
+            .matchUdpDst(TpPort.tpPort(UDP.DHCP_SERVER_PORT))
+            .matchUdpSrc(TpPort.tpPort(UDP.DHCP_CLIENT_PORT));
+        TrafficTreatment.Builder treatmentBuilder = DefaultTrafficTreatment.builder()
+            .setOutput(PortNumber.CONTROLLER);
+        FlowRule.Builder flowbuilder = DefaultFlowRule.builder()
+            .forTable(0)
+            .forDevice(cp.deviceId())
+            .withSelector(selectorBuilder.build())
+            .withTreatment(treatmentBuilder.build())
+            .withPriority(FLOWPRIORITY)
+            .fromApp(appId)
+            .makePermanent();
+        
+        flowRuleService.applyFlowRules(flowbuilder.build());
+        // supFlowrules.add(supMac, flow);
+    }
+
+    /**
+    * Block user for EAP packet
+    * @param supMac
+    * @param cp
+    * @param timeout
+    */
+    private void eapBlock(MacAddress supMac, ConnectPoint cp, int timeout) {
+        log.info("enter @ blockUsr()");
+        TrafficSelector.Builder selectorBuilder = DefaultTrafficSelector.builder()
+            .matchEthSrc(supMac)
+            .matchEthType(EtherType.EAPOL.ethType().toShort());
+        TrafficTreatment.Builder treatmentBuilder = DefaultTrafficTreatment.builder()
+            .drop();
+        FlowRule flow = DefaultFlowRule.builder()
+            .forTable(0)
+            .forDevice(cp.deviceId())
+            .withSelector(selectorBuilder.build())
+            .withTreatment(treatmentBuilder.build())
+            .withPriority(FLOWPRIORITY)
+            .withHardTimeout(timeout)
+            .fromApp(appId)
+            .build();
+        flowRuleService.applyFlowRules(flow);
+    }
+
+    private void updateDb(MacAddress supMac, ConnectPoint connectp, String userName, String state) {
+        boolean existActive = false;
+        boolean existAuthorized = false;
+        int errCtr = 0;
+
+        try (Connection connection = DriverManager.getConnection(dbUrl, dbUser, dbPassword)) {
+            // retrive user record in table activeDevice
+            try (Statement stmt = connection.createStatement()) {
+                String sql = "SELECT * FROM activeDevice " +
+                                "WHERE mac = '" + supMac.toString() + "'";
+                try (ResultSet res = stmt.executeQuery(sql)) {
+                    if (res.next()) {
+                        existActive = true;
+                        errCtr = res.getInt("err_ctr");
+                        if (res.getBoolean("blked")) {
+                            log.info("User '{}' had been blocked!!", userName);
+                            return;
+                        }
+                    }
+                }
+            } catch (SQLException e) {
+                log.info("[SQLException] (@8001) state: " + e.getSQLState() + " message: " + e.getMessage());
+            }
+
+            try (Statement stmt = connection.createStatement()) {
+                String sql = "SELECT * FROM authorizedDevice " +
+                                "WHERE mac = '" + supMac.toString() + "'";
+                try (ResultSet res = stmt.executeQuery(sql)) {
+                    if (res.isBeforeFirst()) {
+                        existAuthorized = true;
+                    }
+                }
+            } catch (SQLException e) {
+                log.info("[SQLException] (@8011) state: " + e.getSQLState() + " message: " + e.getMessage());
+            }
+
+            int userID = -1;
+            int groupID = -1;
+            int loginTimeout = -1;
+            int switchID = -1;
+
+            log.info("\n************* Authentication Event **************"      +
+                     "\n***** SupplicantMacAddress: "    + supMac.toString()    +
+                     "\n***** ConnectPoint:         "    + connectp.toString()  +
+                     "\n***** UserName:             "    + userName             +
+                     "\n***** State:                "    + state                +
+                     "\n*************************************************");
+
+            // get userID by user name
+            try (Statement stmt = connection.createStatement()) {
+                String sql = "SELECT user_id, user.group_id, login_timeout " +
+                                "FROM user LEFT JOIN `group` " +
+                                "ON user.group_id = `group`.group_id " +
+                                "WHERE user_name = '" + userName + "'";
+                try (ResultSet res = stmt.executeQuery(sql)) {
+                    if (!res.isBeforeFirst()) {
+                        throw new SQLException("Can't find user " + userName + " in the user switch!");
+                    }
+                    while (res.next()) {
+                        userID = res.getInt("user_id");
+                        groupID = res.getInt("group_id");
+                        loginTimeout = res.getInt("login_timeout");
+                        break;
+                    }
+                }
+            } catch (SQLException e) {
+                log.info("[SQLException] (@8002) state: " + e.getSQLState() + " message: " + e.getMessage());
+            }
+
+            // get switchID by switch uri
+            try (Statement stmt = connection.createStatement()) {
+                String sql = "SELECT switch_id FROM switch WHERE switch_uri = '" + connectp.deviceId().toString() + "'";
+                try (ResultSet res = stmt.executeQuery(sql)) {
+                    if (!res.isBeforeFirst()) {
+                        throw new SQLException("Can't find switch " + connectp.deviceId().toString() + " in the table switch!");
+                    }
+                    while (res.next()) {
+                        switchID = res.getInt("switch_id");
+                        break;
+                    }
+                }
+            } catch (SQLException e) {
+                log.info("[SQLException] (@8003) state: " + e.getSQLState() + " message: " + e.getMessage());
+            }
+
+            // log for each authentication event
+            if (state.equals("AUTHORIZED_STATE") || state.equals("UNAUTHORIZED_STATE")) {
+                try (
+                    PreparedStatement insertIntoLog = connection.prepareStatement(
+                        "INSERT INTO authenLog " +
+                        "(user_id, mac, ip, switch_id, switch_port, auth_state) " +
+                        "VALUES (?, ?, ?, ?, ?, ?)")
+                ) {
+                    insertIntoLog.setInt(1, userID);
+                    insertIntoLog.setString(2, supMac.toString());
+                    insertIntoLog.setString(3, null);
+                    insertIntoLog.setInt(4, switchID);
+                    insertIntoLog.setInt(5, (int) connectp.port().toLong());
+                    insertIntoLog.setString(6, state);
+                    insertIntoLog.executeUpdate();
+                } catch (SQLException e) {
+                    log.info("[SQLException] (@8004) state: " + e.getSQLState() + " message: " + e.getMessage());
+                }
+            }
+
+
+            /**
+             * Some user was authenticated.
+             */
+            if (state.equals("AUTHORIZED_STATE")) {
+
+                // allowing authorized device to use DHCP service
+                dhcpAllow(supMac, connectp, loginTimeout, (groupID == 1));
+
+                // skip already authorized device
+                if (existAuthorized) {
+                    log.info("Device '{}' has been authorized!", supMac);
+                    return;
+                }
+
+                // move record from table activeDevice to authorizedDevice
+                if (existActive) {
+                    try (Statement stmt = connection.createStatement()) {
+                        String sql = "DELETE FROM activeDevice " +
+                            "WHERE mac = '" + supMac.toString() + "'";
+                        stmt.executeUpdate(sql);
+                    } catch (SQLException e) {
+                        log.info("[SQLException] (@8006) state: " + e.getSQLState() + " message: " + e.getMessage());
+                    }
+                }
+
+                Calendar cal = Calendar.getInstance();
+                cal.add(Calendar.SECOND, loginTimeout);
+                Timestamp ts = new Timestamp(cal.getTimeInMillis());
+
+                try (
+                    PreparedStatement insertIntoAuthorized = connection.prepareStatement(
+                        "INSERT INTO authorizedDevice " +
+                        "(mac, switch_id, switch_port, user_id, group_id, ip, rule_installed, auth_exp_time) " +
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                    )
+                ) {
+                    insertIntoAuthorized.setString(1, supMac.toString());
+                    insertIntoAuthorized.setInt(2, switchID);
+                    insertIntoAuthorized.setInt(3, (int) connectp.port().toLong());
+                    insertIntoAuthorized.setInt(4, userID);
+                    insertIntoAuthorized.setInt(5, groupID);
+                    insertIntoAuthorized.setString(6, null);
+                    insertIntoAuthorized.setBoolean(7, false);
+                    if (groupID == 1) {
+                        insertIntoAuthorized.setTimestamp(8, null);
+                    } else {
+                        insertIntoAuthorized.setTimestamp(8, ts, cal);
+                    }
+                    insertIntoAuthorized.executeUpdate();
+                } catch (SQLException e) {
+                    log.info("[SQLException] (@8007) state: " + e.getSQLState() + " message: " + e.getMessage());
+                }
+            } else {
+
+                // add new entry in table activeDevice for this unseen device
+                if (!existActive && !existAuthorized) {
+                    try (
+                        PreparedStatement insertIntoActive = connection.prepareStatement(
+                            "INSERT INTO activeDevice " +
+                            "(mac, switch_id, switch_port, user_id, err_ctr, blked, err_exp_time, blk_exp_time) " +
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                        )
+                    ) {
+                        insertIntoActive.setString(1, supMac.toString());
+                        insertIntoActive.setInt(2, switchID);
+                        insertIntoActive.setInt(3, (int) connectp.port().toLong());
+                        insertIntoActive.setInt(4, userID);
+                        insertIntoActive.setInt(5, 0);
+                        insertIntoActive.setBoolean(6, false);
+                        insertIntoActive.setTimestamp(7, null);
+                        insertIntoActive.setTimestamp(8, null);
+                        insertIntoActive.executeUpdate();
+                    } catch (SQLException e) {
+                        log.info("[SQLException] (@8008) state: " + e.getSQLState() + " message: " + e.getMessage());
+                    }
+                }
+
+                /**
+                 * Some one's password is incorrect!!
+                 */
+                if (state.equals("UNAUTHORIZED_STATE")) {
+                    errCtr += 1;
+                    if (errCtr > PASSWDERRLIMIT) {
+                        Calendar cal = Calendar.getInstance();
+                        cal.add(Calendar.SECOND, BLOCKPERIOD);
+                        Timestamp blkts = new Timestamp(cal.getTimeInMillis());
+                        try (
+                            PreparedStatement updateActive = connection.prepareStatement(
+                                "UPDATE activeDevice " +
+                                "SET err_ctr = ?, blked = ?, err_exp_time = ?, blk_exp_time = ? " +
+                                "WHERE mac = ?"
+                            )
+                        ) {
+                            updateActive.setInt(1, 0);
+                            updateActive.setBoolean(2, true);
+                            updateActive.setTimestamp(3, null);
+                            updateActive.setTimestamp(4, blkts, cal);
+                            updateActive.setString(5, supMac.toString());
+                            updateActive.executeUpdate();
+                        } catch (SQLException e) {
+                            log.info("[SQLException] (@8009) state: " + e.getSQLState() + " message: " + e.getMessage());
+                        }
+
+                        // install drop eapol flow rule
+                        eapBlock(supMac, connectp, BLOCKPERIOD);
+                    } else {
+                        Calendar cal = Calendar.getInstance();
+                        cal.add(Calendar.SECOND, ERRRSTPERIOD);
+                        Timestamp errts = new Timestamp(cal.getTimeInMillis());
+                        try (
+                            PreparedStatement updateActive = connection.prepareStatement(
+                                "UPDATE activeDevice " +
+                                "SET err_ctr = ?, err_exp_time = ? " +
+                                "WHERE mac = ?"
+                            )
+                        ) {
+                            updateActive.setInt(1, errCtr);
+                            updateActive.setTimestamp(2, errts, cal);
+                            updateActive.setString(3, supMac.toString());
+                            updateActive.executeUpdate();
+                        } catch (SQLException e) {
+                            log.info("[SQLException] (@8010) state: " + e.getSQLState() + " message: " + e.getMessage());
+                        }
+                    }
+                }
+            }
+        } catch (SQLException e) {
+            log.info("[SQLException] (@event) state: " + e.getSQLState() + " message: " + e.getMessage());
+        }
     }
 
     private class InternalAuthenticationEventListener implements AuthenticationEventListener {
@@ -860,9 +1376,6 @@ public class Authenticator8021xManager implements Authenticator8021xService {
         public void event(AuthenticationEvent event) {
             AuthenticationRecord aaaAuthenticationRecord = event.authenticationRecord();
             String state = aaaAuthenticationRecord.state();
-            boolean existActive = false;
-            boolean existAuthorized = false;
-            int errCtr = 0;
 
             if (state.equals("IDLE_STATE")) {
                 return;
@@ -872,290 +1385,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
             ConnectPoint connectp = aaaAuthenticationRecord.supplicantConnectPoint();
             String userName = new String(aaaAuthenticationRecord.username());
 
-            try (Connection connection = DriverManager.getConnection(dbUrl, dbUser, dbPassword)) {
-                // retrive user record in table activeDevice
-                try (Statement stmt = connection.createStatement()) {
-                    String sql = "SELECT * FROM activeDevice " +
-                                    "WHERE mac = '" + supMac.toString() + "'";
-                    try (ResultSet res = stmt.executeQuery(sql)) {
-                        if (res.next()) {
-                            existActive = true;
-                            errCtr = res.getInt("err_ctr");
-                            if (res.getBoolean("blked")) {
-                                log.info("User '{}' had been blocked!!", userName);
-                                return;
-                            }
-                        }
-                    }
-                } catch (SQLException e) {
-                    log.info("[SQLException] (@8001) state: " + e.getSQLState() + " message: " + e.getMessage());
-                }
-
-                try (Statement stmt = connection.createStatement()) {
-                    String sql = "SELECT * FROM authorizedDevice " +
-                                    "WHERE mac = '" + supMac.toString() + "'";
-                    try (ResultSet res = stmt.executeQuery(sql)) {
-                        if (res.isBeforeFirst()) {
-                            existAuthorized = true;
-                        }
-                    }
-                } catch (SQLException e) {
-                    log.info("[SQLException] (@8011) state: " + e.getSQLState() + " message: " + e.getMessage());
-                }
-
-                int userID = -1;
-                int groupID = -1;
-                int loginTimeout = -1;
-                int switchID = -1;
-    
-                log.info("\n************* Authentication Event **************"      +
-                         "\n***** SupplicantMacAddress: "    + supMac.toString()    +
-                         "\n***** ConnectPoint:         "    + connectp.toString()  +
-                         "\n***** UserName:             "    + userName             +
-                         "\n***** State:                "    + state                +
-                         "\n*************************************************");
-
-                // get userID by user name
-                try (Statement stmt = connection.createStatement()) {
-                    String sql = "SELECT user_id, user.group_id, login_timeout " +
-                                    "FROM user LEFT JOIN `group` " +
-                                    "ON user.group_id = `group`.group_id " +
-                                    "WHERE user_name = '" + userName + "'";
-                    try (ResultSet res = stmt.executeQuery(sql)) {
-                        if (!res.isBeforeFirst()) {
-                            throw new SQLException("Can't find user " + userName + " in the user switch!");
-                        }
-                        while (res.next()) {
-                            userID = res.getInt("user_id");
-                            groupID = res.getInt("group_id");
-                            loginTimeout = res.getInt("login_timeout");
-                            break;
-                        }
-                    }
-                } catch (SQLException e) {
-                    log.info("[SQLException] (@8002) state: " + e.getSQLState() + " message: " + e.getMessage());
-                }
-
-                // get switchID by switch uri
-                try (Statement stmt = connection.createStatement()) {
-                    String sql = "SELECT switch_id FROM switch WHERE switch_uri = '" + connectp.deviceId().toString() + "'";
-                    try (ResultSet res = stmt.executeQuery(sql)) {
-                        if (!res.isBeforeFirst()) {
-                            throw new SQLException("Can't find switch " + connectp.deviceId().toString() + " in the table switch!");
-                        }
-                        while (res.next()) {
-                            switchID = res.getInt("switch_id");
-                            break;
-                        }
-                    }
-                } catch (SQLException e) {
-                    log.info("[SQLException] (@8003) state: " + e.getSQLState() + " message: " + e.getMessage());
-                }
-
-                // log for each authentication event
-                if (state.equals("AUTHORIZED_STATE") || state.equals("UNAUTHORIZED_STATE")) {
-                    try (
-                        PreparedStatement insertIntoLog = connection.prepareStatement(
-                            "INSERT INTO authenLog " +
-                            "(user_id, mac, ip, switch_id, switch_port, auth_state) " +
-                            "VALUES (?, ?, ?, ?, ?, ?)")
-                    ) {
-                        insertIntoLog.setInt(1, userID);
-                        insertIntoLog.setString(2, supMac.toString());
-                        insertIntoLog.setString(3, null);
-                        insertIntoLog.setInt(4, switchID);
-                        insertIntoLog.setInt(5, (int) connectp.port().toLong());
-                        insertIntoLog.setString(6, state);
-                        insertIntoLog.executeUpdate();
-                    } catch (SQLException e) {
-                        log.info("[SQLException] (@8004) state: " + e.getSQLState() + " message: " + e.getMessage());
-                    }
-                }
-
-
-                /**
-                 * Some user was authenticated.
-                 */
-                if (state.equals("AUTHORIZED_STATE")) {
-
-                    // allowing authorized device to use DHCP service
-                    dhcpAllow(supMac, connectp, loginTimeout, (groupID == 1));
-
-                    // skip already authorized device
-                    if (existAuthorized) {
-                        log.info("Device '{}' has been authorized!", supMac);
-                        return;
-                    }
-
-                    // move record from table activeDevice to authorizedDevice
-                    if (existActive) {
-                        try (Statement stmt = connection.createStatement()) {
-                            String sql = "DELETE FROM activeDevice " +
-                                "WHERE mac = '" + supMac.toString() + "'";
-                            stmt.executeUpdate(sql);
-                        } catch (SQLException e) {
-                            log.info("[SQLException] (@8006) state: " + e.getSQLState() + " message: " + e.getMessage());
-                        }
-                    }
-
-                    Calendar cal = Calendar.getInstance();
-                    cal.add(Calendar.SECOND, loginTimeout);
-                    Timestamp ts = new Timestamp(cal.getTimeInMillis());
-
-                    try (
-                        PreparedStatement insertIntoAuthorized = connection.prepareStatement(
-                            "INSERT INTO authorizedDevice " +
-                            "(mac, switch_id, switch_port, user_id, group_id, ip, rule_installed, auth_exp_time) " +
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-                        )
-                    ) {
-                        insertIntoAuthorized.setString(1, supMac.toString());
-                        insertIntoAuthorized.setInt(2, switchID);
-                        insertIntoAuthorized.setInt(3, (int) connectp.port().toLong());
-                        insertIntoAuthorized.setInt(4, userID);
-                        insertIntoAuthorized.setInt(5, groupID);
-                        insertIntoAuthorized.setString(6, null);
-                        insertIntoAuthorized.setBoolean(7, false);
-                        if (groupID == 1) {
-                            insertIntoAuthorized.setTimestamp(8, null);
-                        } else {
-                            insertIntoAuthorized.setTimestamp(8, ts, cal);
-                        }
-                        insertIntoAuthorized.executeUpdate();
-                    } catch (SQLException e) {
-                        log.info("[SQLException] (@8007) state: " + e.getSQLState() + " message: " + e.getMessage());
-                    }
-                } else {
-
-                    // add new entry in table activeDevice for this unseen device
-                    if (!existActive && !existAuthorized) {
-                        try (
-                            PreparedStatement insertIntoActive = connection.prepareStatement(
-                                "INSERT INTO activeDevice " +
-                                "(mac, switch_id, switch_port, user_id, err_ctr, blked, err_exp_time, blk_exp_time) " +
-                                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-                            )
-                        ) {
-                            insertIntoActive.setString(1, supMac.toString());
-                            insertIntoActive.setInt(2, switchID);
-                            insertIntoActive.setInt(3, (int) connectp.port().toLong());
-                            insertIntoActive.setInt(4, userID);
-                            insertIntoActive.setInt(5, 0);
-                            insertIntoActive.setBoolean(6, false);
-                            insertIntoActive.setTimestamp(7, null);
-                            insertIntoActive.setTimestamp(8, null);
-                            insertIntoActive.executeUpdate();
-                        } catch (SQLException e) {
-                            log.info("[SQLException] (@8008) state: " + e.getSQLState() + " message: " + e.getMessage());
-                        }
-                    }
-
-                    /**
-                     * Some one's password is incorrect!!
-                     */
-                    if (state.equals("UNAUTHORIZED_STATE")) {
-                        errCtr += 1;
-                        if (errCtr > PASSWDERRLIMIT) {
-                            Calendar cal = Calendar.getInstance();
-                            cal.add(Calendar.SECOND, BLOCKPERIOD);
-                            Timestamp blkts = new Timestamp(cal.getTimeInMillis());
-                            try (
-                                PreparedStatement updateActive = connection.prepareStatement(
-                                    "UPDATE activeDevice " +
-                                    "SET err_ctr = ?, blked = ?, err_exp_time = ?, blk_exp_time = ? " +
-                                    "WHERE mac = ?"
-                                )
-                            ) {
-                                updateActive.setInt(1, 0);
-                                updateActive.setBoolean(2, true);
-                                updateActive.setTimestamp(3, null);
-                                updateActive.setTimestamp(4, blkts, cal);
-                                updateActive.setString(5, supMac.toString());
-                                updateActive.executeUpdate();
-                            } catch (SQLException e) {
-                                log.info("[SQLException] (@8009) state: " + e.getSQLState() + " message: " + e.getMessage());
-                            }
-
-                            // install drop eapol flow rule
-                            eapBlock(supMac, connectp, BLOCKPERIOD);
-                        } else {
-                            Calendar cal = Calendar.getInstance();
-                            cal.add(Calendar.SECOND, ERRRSTPERIOD);
-                            Timestamp errts = new Timestamp(cal.getTimeInMillis());
-                            try (
-                                PreparedStatement updateActive = connection.prepareStatement(
-                                    "UPDATE activeDevice " +
-                                    "SET err_ctr = ?, err_exp_time = ? " +
-                                    "WHERE mac = ?"
-                                )
-                            ) {
-                                updateActive.setInt(1, errCtr);
-                                updateActive.setTimestamp(2, errts, cal);
-                                updateActive.setString(3, supMac.toString());
-                                updateActive.executeUpdate();
-                            } catch (SQLException e) {
-                                log.info("[SQLException] (@8010) state: " + e.getSQLState() + " message: " + e.getMessage());
-                            }
-                        }
-                    }
-                }
-            } catch (SQLException e) {
-                log.info("[SQLException] (@event) state: " + e.getSQLState() + " message: " + e.getMessage());
-            }
-        }
-
-        /**
-         * Allow DHCP.
-         * @param supMac
-         * @param cp
-         * @param loginTimeout
-         */
-        private void dhcpAllow(MacAddress supMac, ConnectPoint cp, int loginTimeout, boolean softHard) {
-            log.info("enter @ dhcpAllow()");
-            TrafficSelector.Builder selectorBuilder = DefaultTrafficSelector.builder()
-                .matchEthSrc(supMac)
-                .matchEthType(Ethernet.TYPE_IPV4)
-                .matchIPProtocol(IPv4.PROTOCOL_UDP)
-                .matchUdpDst(TpPort.tpPort(UDP.DHCP_SERVER_PORT))
-                .matchUdpSrc(TpPort.tpPort(UDP.DHCP_CLIENT_PORT));
-            TrafficTreatment.Builder treatmentBuilder = DefaultTrafficTreatment.builder()
-                .setOutput(PortNumber.CONTROLLER);
-            FlowRule.Builder flowbuilder = DefaultFlowRule.builder()
-                .forTable(0)
-                .forDevice(cp.deviceId())
-                .withSelector(selectorBuilder.build())
-                .withTreatment(treatmentBuilder.build())
-                .withPriority(FLOWPRIORITY)
-                .fromApp(appId)
-                .makePermanent();
-            
-            flowRuleService.applyFlowRules(flowbuilder.build());
-            // supFlowrules.add(supMac, flow);
-        }
-
-        /**
-         * Block user for EAP packet
-         * @param supMac
-         * @param cp
-         * @param timeout
-         */
-        private void eapBlock(MacAddress supMac, ConnectPoint cp, int timeout) {
-            log.info("enter @ blockUsr()");
-            TrafficSelector.Builder selectorBuilder = DefaultTrafficSelector.builder()
-                .matchEthSrc(supMac)
-                .matchEthType(EtherType.EAPOL.ethType().toShort());
-            TrafficTreatment.Builder treatmentBuilder = DefaultTrafficTreatment.builder()
-                .drop();
-            FlowRule flow = DefaultFlowRule.builder()
-                .forTable(0)
-                .forDevice(cp.deviceId())
-                .withSelector(selectorBuilder.build())
-                .withTreatment(treatmentBuilder.build())
-                .withPriority(FLOWPRIORITY)
-                .withHardTimeout(timeout)
-                .fromApp(appId)
-                .build();
-            flowRuleService.applyFlowRules(flow);
+            updateDb(supMac, connectp, userName, state);
         }
     }
 
