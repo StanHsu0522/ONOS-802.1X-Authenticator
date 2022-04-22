@@ -136,7 +136,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
     private static final MacAddress GATEWAYMAC = MacAddress.valueOf("ea:e9:78:fb:fd:00");
     private final ConnectPoint GATE_WAY_CONNECT_POINT = ConnectPoint.fromString​("of:000078321bdf7000/10");
     private static final ConnectPoint RADIUS_SERVER_CONNCECT_POINT = ConnectPoint.fromString​("of:000078321bdf7000/12");
-    private static final ConnectPoint WIRELESS_CONNCECT_POINT = ConnectPoint.fromString​("of:0000903cb3b16e59/24");
+    private static final ConnectPoint WIRELESS_CONNCECT_POINT = ConnectPoint.fromString​("of:0000903cb3b16e57/12");
 
     // Configure Flow Priority
     // private static final int FORBIDFLOWPRIORITY = 60001;
@@ -573,7 +573,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                             log.error("Cannot deserialize packet", dex);
                             return;
                         }
-                        log.info("Got RADIUS Packet: {}:{}->{}:{}",srcIp, srcPort, dstIp, dstPort);
+                        // log.info("Got RADIUS Packet: {}:{}->{}:{}",srcIp, srcPort, dstIp, dstPort);
 
                         // Incoming packet (AP Authenticator <-- RADIUS server)
                         if (srcPort == RADIUS_AUTH_PORT) {
@@ -605,6 +605,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                         }
 
                         byte pktId = radiusPkt.getIdentifier();
+                        boolean isFirstReq = true;
                         switch (radiusPkt.getCode()) {
                             case RADIUS.RADIUS_CODE_ACCESS_REQUEST:
                                 RADIUSAttribute radiusAttrUserName =
@@ -620,14 +621,22 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                                     calling_station_id = new String(radiusAttrCallingStationId.getValue(), StandardCharsets.UTF_8);
                                     calling_station_id = calling_station_id.replace('-', ':');
                                 }
-                                log.info("ACCESS_REQUEST [radius_id={}, user_name={}, mac_addr={}]", pktId, user_name, calling_station_id);
-                                outgoingPacketMap.put(pktId, new PacketInfo(calling_station_id, user_name, pktId));
-                                updateDb(MacAddress.valueOf(calling_station_id), WIRELESS_CONNCECT_POINT, user_name, "STARTED_STATE");
+                                log.info("ACCESS_REQUEST [radius_id={}, user_name={}, mac_addr={}]",
+                                        pktId, user_name, calling_station_id);
+                                for (PacketInfo pktInfo : outgoingPacketMap.values()) {
+                                    if (pktInfo.mac.equals(MacAddress.valueOf(calling_station_id))) {
+                                        isFirstReq = false;
+                                        break;
+                                    }
+                                }
+                                if (isFirstReq) {
+                                    updateDb(MacAddress.valueOf(calling_station_id), WIRELESS_CONNCECT_POINT, user_name, "STARTED_STATE");
+                                }
+                                outgoingPacketMap.put(pktId, new PacketInfo(calling_station_id, user_name));
                                 break;
 
                             case RADIUS.RADIUS_CODE_ACCESS_CHALLENGE:
                                 log.info("ACCESS_CHALLENGE [radius_id={}]", pktId);
-                                outgoingPacketMap.remove(pktId);
                                 break;
 
                             case RADIUS.RADIUS_CODE_ACCESS_ACCEPT:
@@ -636,9 +645,13 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                                     log.warn("unkown user has been authorized!");
                                 }
                                 else {
-                                    outgoingPacketMap.remove(pktId);
-                                    log.info("User '{}' ({}) has been authorized!",
-                                            supAccepted.user_name, supAccepted.mac);
+                                    for (Iterator<PacketInfo> it=outgoingPacketMap.values().iterator(); it.hasNext();) {
+                                        if (it.next().mac.equals(supAccepted.mac)) {
+                                            it.remove();
+                                        }
+                                    }
+                                    log.info("ACCESS_ACCEPT [radius_id={}, user_name={}, mac_addr={}]",
+                                            pktId, supAccepted.user_name, supAccepted.mac);
                                     updateDb(supAccepted.mac, WIRELESS_CONNCECT_POINT, supAccepted.user_name, "AUTHORIZED_STATE");
                                 }
                                 break;
@@ -649,7 +662,11 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                                     log.info("unkown user has benn rejected!");
                                 }
                                 else {
-                                    outgoingPacketMap.remove(pktId);
+                                    for (Iterator<PacketInfo> it=outgoingPacketMap.values().iterator(); it.hasNext();) {
+                                        if (it.next().mac.equals(supRejected.mac)) {
+                                            it.remove();
+                                        }
+                                    }
                                     log.info("User '{}' ({}) has been rejected!",
                                             supRejected.user_name, supRejected.mac);
                                     updateDb(supRejected.mac, WIRELESS_CONNCECT_POINT, supRejected.user_name, "UNAUTHORIZED_STATE");
@@ -658,21 +675,20 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                         }
 
                         if (outgoing) {
-                            log.info("Relay packet to RADIUS server at {}", RADIUS_SERVER_CONNCECT_POINT);
+                            // log.info("Relay packet to RADIUS server at {}", RADIUS_SERVER_CONNCECT_POINT);
                             sendPacketToDataPlane(ethPkt, RADIUS_SERVER_CONNCECT_POINT);
                         }
                         else {
-                            log.info("Relay packet to AP at {}", apCp);
+                            // log.info("Relay packet to AP at {}", apCp);
                             sendPacketToDataPlane(ethPkt, apCp);
                         }
 
-                        // Cleaning up stale packet record
-                        Collection<PacketInfo> packets = outgoingPacketMap.values();
-                        for (Iterator<PacketInfo> itp = packets.iterator(); itp.hasNext();) {
+                        // Passively clean up stale packet records
+                        for (Iterator<PacketInfo> itp = outgoingPacketMap.values().iterator(); itp.hasNext();) {
                             Calendar cal = Calendar.getInstance();
                             PacketInfo pktInfo = itp.next();
                             if (pktInfo.timestamp <= cal.getTimeInMillis()) {
-                                log.info("Cleaning up request packet ID {}", pktInfo.id);
+                                log.info("Cleaning up stale packet record...");
                                 itp.remove();
                             }
                         }
@@ -684,13 +700,11 @@ public class Authenticator8021xManager implements Authenticator8021xService {
         private class PacketInfo {
             MacAddress mac;         // RADIUS Calling_Station_Id Attribute
             String user_name;       // RADIUS User_Name Attribute
-            byte id;                // RADIUS identifier
             long timestamp;
     
-            PacketInfo(String mac, String user_name, byte id) {
+            PacketInfo(String mac, String user_name) {
                 this.mac = MacAddress.valueOf(mac);
                 this.user_name = user_name;
-                this.id = id;
 
                 // entry-timeout
                 Calendar cal = Calendar.getInstance();
@@ -1185,12 +1199,12 @@ public class Authenticator8021xManager implements Authenticator8021xService {
             int loginTimeout = -1;
             int switchID = -1;
 
-            log.info("\n************* Authentication Event **************"      +
-                     "\n***** SupplicantMacAddress: "    + supMac.toString()    +
-                     "\n***** ConnectPoint:         "    + connectp.toString()  +
-                     "\n***** UserName:             "    + userName             +
-                     "\n***** State:                "    + state                +
-                     "\n*************************************************");
+            log.info("\n**************** Authentication Event *****************"    +
+                     "\n*****    SupplicantMacAddress:  "    + supMac.toString()    +
+                     "\n*****    ConnectPoint:          "    + connectp.toString()  +
+                     "\n*****    UserName:              "    + userName             +
+                     "\n*****    State:                 "    + state                +
+                     "\n*******************************************************");
 
             // get userID by user name
             try (Statement stmt = connection.createStatement()) {
