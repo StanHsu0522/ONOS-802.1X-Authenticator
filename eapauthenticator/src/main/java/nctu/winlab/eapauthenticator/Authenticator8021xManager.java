@@ -132,12 +132,11 @@ public class Authenticator8021xManager implements Authenticator8021xService {
     private static final int BLOCKPERIOD = 180;             // in second
     private static final int ERRRSTPERIOD = 60;             // in second
     // private static final String MONITORIP = "192.168.44.103";
-    // private static final String GATEWAYMAC = "ea:e9:78:fb:fd:00";
-    private final ConnectPoint GATE_WAY_CONNECT_POINT = ConnectPoint.fromString​("of:000078321bdf7000/10");
     // private final ConnectPoint MONITOR_CONNECT_POINT = ConnectPoint.fromString​("of:000078321bdf7000/9");
+    private static final MacAddress GATEWAYMAC = MacAddress.valueOf("ea:e9:78:fb:fd:00");
+    private final ConnectPoint GATE_WAY_CONNECT_POINT = ConnectPoint.fromString​("of:000078321bdf7000/10");
     private static final ConnectPoint RADIUS_SERVER_CONNCECT_POINT = ConnectPoint.fromString​("of:000078321bdf7000/12");
-    // private static final ConnectPoint AP_AUTHENTICATOR_CONNCECT_POINT = ConnectPoint.fromString​("of:000078321bdf7000/11");
-    private static final ConnectPoint WIRELESS_CONNCECT_POINT = ConnectPoint.fromString​("of:000078321bdf4200/15");
+    private static final ConnectPoint WIRELESS_CONNCECT_POINT = ConnectPoint.fromString​("of:0000903cb3b16e59/24");
 
     // Configure Flow Priority
     // private static final int FORBIDFLOWPRIORITY = 60001;
@@ -264,6 +263,10 @@ public class Authenticator8021xManager implements Authenticator8021xService {
             }
             try (Statement stmt = connection.createStatement()) {
                 String sql = "ALTER TABLE authenLog AUTO_INCREMENT = 1";
+                stmt.executeUpdate(sql);
+            }
+            try (Statement stmt = connection.createStatement()) {
+                String sql = "DELETE FROM activeDevice";
                 stmt.executeUpdate(sql);
             }
             try (Statement stmt = connection.createStatement()) {
@@ -405,7 +408,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
         // to go back and forward the gateway.
         TrafficSelector.Builder selectorFwdBuilder = DefaultTrafficSelector.builder()
             .matchEthType(Ethernet.TYPE_IPV4)
-            .matchIPDscp​(grpConf.dscp);
+            .matchIPDscp(grpConf.dscp);
         for (DeviceId devId : allDevices) {
             if (!devId.equals(GATE_WAY_CONNECT_POINT.deviceId())) {
 
@@ -437,8 +440,8 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                 //     }
                 // }
                 TrafficTreatment.Builder treatmentBuilder = DefaultTrafficTreatment.builder()
-                    .setOutput(GATE_WAY_CONNECT_POINT.port())
-                    .setIpDscp((byte) 0);
+                    .setIpDscp((byte) 0)
+                    .setOutput(GATE_WAY_CONNECT_POINT.port());
                     // .meter(grpConf.meter.id());
                 flowrulesTobeInstalled.add(
                     DefaultFlowRule.builder()
@@ -688,7 +691,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                 this.mac = MacAddress.valueOf(mac);
                 this.user_name = user_name;
                 this.id = id;
-    
+
                 // entry-timeout
                 Calendar cal = Calendar.getInstance();
                 cal.add(Calendar.SECOND, PACKET_RECORD_TIMEOUT);
@@ -764,7 +767,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                                 } catch (SQLException e) {
                                     log.info("[SQLException] (@9000) state: " + e.getSQLState() + " message: " + e.getMessage());
                                 }
-                                
+
                                 // user location changed
                                 if ((switchID_now != switchID) || (switchPort_now != switchPort)) {
                                     // try (PreparedStatement insertIntoLogLoc = connection.prepareStatement(
@@ -784,8 +787,9 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                                     // } catch (SQLException e) {
                                     //     log.info("[SQLException] (@9002) state: " + e.getSQLState() + " message: " + e.getMessage());
                                     // }
-                                    log.info("Device {} location changed from {}/{} to {}/{}",
-                                        srcMac, switchID, switchPort, switchID_now, switchPort_now);
+
+                                    log.info("Device {} location changed from {}/{} to {}/{} ({})",
+                                        srcMac, switchID, switchPort, switchID_now, switchPort_now, connectp.deviceId());
 
                                     // purge dirty flowrules
                                     List<FlowRule> flowsToBeDel = supFlowrules.get(srcMac);
@@ -817,6 +821,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                                 }
 
                                 if (!installed || ((switchID_now != switchID) || (switchPort_now != switchPort))) {
+                                // if (!installed) {
                                     // log user packet-in
                                     try (PreparedStatement insertIntoLogPktIn = connection.prepareStatement(
                                         "INSERT INTO authenLog " +
@@ -867,14 +872,16 @@ public class Authenticator8021xManager implements Authenticator8021xService {
             return;
         } else {
             TrafficSelector.Builder selectorBuilderIn = DefaultTrafficSelector.builder()
+                .matchEthSrc(GATEWAYMAC)
                 .matchEthDst(mac)
                 .matchEthType(Ethernet.TYPE_IPV4);
             TrafficSelector.Builder selectorBuilderOut = DefaultTrafficSelector.builder()
                 .matchEthSrc(mac)
+                .matchEthDst(GATEWAYMAC)
                 .matchEthType(Ethernet.TYPE_IPV4);
             TrafficTreatment.Builder treatmentBuilderOut = DefaultTrafficTreatment.builder()
-                .setOutput(path.src().port())
-                .setIpDscp(dscp);
+                .setIpDscp(dscp)
+                .setOutput(path.src().port());
 
             FlowRule.Builder flowruleBuilderFron = DefaultFlowRule.builder()
                 .forTable(0)
@@ -882,12 +889,13 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                 .withSelector(selectorBuilderOut.build())
                 .withTreatment(treatmentBuilderOut.build())
                 .withPriority(FLOWPRIORITY)
+                .makePermanent()
                 .fromApp(appId);
-            if (softHard) {
-                flowruleBuilderFron.makeTemporary(timeout);
-            } else {
-                flowruleBuilderFron.withHardTimeout(timeout);
-            }
+            // if (softHard) {
+            //     flowruleBuilderFron.makeTemporary(timeout);
+            // } else {
+            //     flowruleBuilderFron.withHardTimeout(timeout);
+            // }
             flowrules.add(flowruleBuilderFron.build());
 
             // Installing backward flow rule for user
@@ -903,12 +911,13 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                     .withSelector(selectorBuilderIn.build())
                     .withTreatment(treatmentBuilderIn.build())
                     .withPriority(FLOWPRIORITY)
+                    .makePermanent()
                     .fromApp(appId);
-                if (softHard) {
-                    flowruleBuilderMid.makeTemporary(timeout);
-                } else {
-                    flowruleBuilderMid.withHardTimeout(timeout);
-                }
+                // if (softHard) {
+                //     flowruleBuilderMid.makeTemporary(timeout);
+                // } else {
+                //     flowruleBuilderMid.withHardTimeout(timeout);
+                // }
                 flowrules.add(flowruleBuilderMid.build());
             }
 
@@ -921,12 +930,13 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                 .withSelector(selectorBuilderIn.build())
                 .withTreatment(lastTreatmentBuilderIn.build())
                 .withPriority(FLOWPRIORITY)
+                .makePermanent()
                 .fromApp(appId);
-            if (softHard) {
-                flowruleBuilderRear.makeTemporary(timeout);
-            } else {
-                flowruleBuilderRear.withHardTimeout(timeout);
-            }
+            // if (softHard) {
+            //     flowruleBuilderRear.makeTemporary(timeout);
+            // } else {
+            //     flowruleBuilderRear.withHardTimeout(timeout);
+            // }
             flowrules.add(flowruleBuilderRear.build());
         }
 
