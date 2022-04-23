@@ -600,6 +600,8 @@ public class Authenticator8021xManager implements Authenticator8021xService {
 
                             // update authenticator's location
                             if (apCp != context.inPacket().receivedFrom()) {
+                                log.warn("Wireless authenticator location changed from {}->{}",
+                                        apCp, context.inPacket().receivedFrom());
                                 authenticatorLoc.replace(srcMac, context.inPacket().receivedFrom());
                             }
                         }
@@ -621,7 +623,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                                     calling_station_id = new String(radiusAttrCallingStationId.getValue(), StandardCharsets.UTF_8);
                                     calling_station_id = calling_station_id.replace('-', ':');
                                 }
-                                log.info("ACCESS_REQUEST [radius_id={}, user_name={}, mac_addr={}]",
+                                log.debug("ACCESS_REQUEST [radius_id={}, user_name={}, mac_addr={}]",
                                         pktId, user_name, calling_station_id);
                                 for (PacketInfo pktInfo : outgoingPacketMap.values()) {
                                     if (pktInfo.mac.equals(MacAddress.valueOf(calling_station_id))) {
@@ -636,7 +638,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                                 break;
 
                             case RADIUS.RADIUS_CODE_ACCESS_CHALLENGE:
-                                log.info("ACCESS_CHALLENGE [radius_id={}]", pktId);
+                                log.debug("ACCESS_CHALLENGE [radius_id={}]", pktId);
                                 break;
 
                             case RADIUS.RADIUS_CODE_ACCESS_ACCEPT:
@@ -650,7 +652,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                                             it.remove();
                                         }
                                     }
-                                    log.info("ACCESS_ACCEPT [radius_id={}, user_name={}, mac_addr={}]",
+                                    log.debug("ACCESS_ACCEPT [radius_id={}, user_name={}, mac_addr={}]",
                                             pktId, supAccepted.user_name, supAccepted.mac);
                                     updateDb(supAccepted.mac, WIRELESS_CONNCECT_POINT, supAccepted.user_name, "AUTHORIZED_STATE");
                                 }
@@ -675,12 +677,12 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                         }
 
                         if (outgoing) {
-                            // log.info("Relay packet to RADIUS server at {}", RADIUS_SERVER_CONNCECT_POINT);
-                            sendPacketToDataPlane(ethPkt, RADIUS_SERVER_CONNCECT_POINT);
+                            log.debug("Relay packet to RADIUS server at {}", RADIUS_SERVER_CONNCECT_POINT);
+                            sendToDataPlane(ethPkt, RADIUS_SERVER_CONNCECT_POINT);
                         }
                         else {
-                            // log.info("Relay packet to AP at {}", apCp);
-                            sendPacketToDataPlane(ethPkt, apCp);
+                            log.debug("Relay packet to AP at {}", apCp);
+                            sendToDataPlane(ethPkt, apCp);
                         }
 
                         // Passively clean up stale packet records
@@ -688,7 +690,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                             Calendar cal = Calendar.getInstance();
                             PacketInfo pktInfo = itp.next();
                             if (pktInfo.timestamp <= cal.getTimeInMillis()) {
-                                log.info("Cleaning up stale packet record...");
+                                log.debug("Cleaning up stale packet record...");
                                 itp.remove();
                             }
                         }
@@ -1092,7 +1094,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
      * @param ethernetPkt
      * @param coonectPt
      */
-    private void sendPacketToDataPlane(Ethernet ethernetPkt, ConnectPoint coonectPt) {
+    private void sendToDataPlane(Ethernet ethernetPkt, ConnectPoint coonectPt) {
         TrafficTreatment treatment = DefaultTrafficTreatment.builder().setOutput(coonectPt.port()).build();
         OutboundPacket packet = new DefaultOutboundPacket(coonectPt.deviceId(),
                                                           treatment, ByteBuffer.wrap(ethernetPkt.serialize()));
