@@ -1,0 +1,27 @@
+#!/bin/bash
+
+EXTIF="eth0"
+INIF="eth1"
+INNET="192.168.44.0/24"
+
+iptables -X
+iptables -F
+iptables -t nat -X
+iptables -t nat -F
+
+iptables -P INPUT ACCEPT
+iptables -P OUTPUT ACCEPT
+iptables -P FORWARD ACCEPT
+iptables -t nat -P PREROUTING ACCEPT
+iptables -t nat -P POSTROUTING ACCEPT
+iptables -t nat -P OUTPUT ACCEPT
+
+iptables -A INPUT -i lo -j ACCEPT
+
+if [ "$INIF" != "" ]; then
+    iptables -A INPUT -i $INIF -j ACCEPT
+    echo "1" > /proc/sys/net/ipv4/ip_forward
+    iptables -t nat -A POSTROUTING -s $INNET -o $EXTIF -j MASQUERADE
+fi
+
+echo "NAT setup completed!"

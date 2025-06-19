@@ -114,6 +114,7 @@ import java.sql.SQLException;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 
+import com.fasterxml.jackson.annotation.JsonProperty.Access;
 import com.mysql.cj.jdbc.Driver;
 
 /**
@@ -135,8 +136,8 @@ public class Authenticator8021xManager implements Authenticator8021xService {
     private static final int ERRRSTPERIOD = 60;             // in second
     // private static final String MONITORIP = "192.168.44.103";
     // private final ConnectPoint MONITOR_CONNECT_POINT = ConnectPoint.fromString​("of:000078321bdf7000/9");
-    private static final MacAddress GATEWAYMAC = MacAddress.valueOf("ea:e9:78:fb:fd:00");
-    private final ConnectPoint GATE_WAY_CONNECT_POINT = ConnectPoint.fromString​("of:000078321bdf7000/10");
+    private static final MacAddress GATEWAYMAC = MacAddress.valueOf("D6:D1:77:B1:10:CD");
+    private final ConnectPoint GATE_WAY_CONNECT_POINT = ConnectPoint.fromString​("of:000078321bdf7000/1");
     private static final ConnectPoint RADIUS_SERVER_CONNCECT_POINT = ConnectPoint.fromString​("of:000078321bdf7000/12");
 
     // Configure Flow Priority
@@ -148,8 +149,8 @@ public class Authenticator8021xManager implements Authenticator8021xService {
 
     // mysql database parameter
     private String dbUrl = "jdbc:mysql://localhost:3306/SDN1X";
-    private String dbUser = "winlab";
-    private String dbPassword = "winlabisgood";
+    private String dbUser = "stan";
+    private String dbPassword = "0416401kh09";
 
     private String someProperty;
 
@@ -518,7 +519,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
     private class RadiusPacketProcessor implements PacketProcessor {
 
         // Packet list for matching access-accept with access-request
-        private Map<Byte, PacketInfo>outgoingPacketMap;
+        private Map<Byte, PacketInfo> outgoingPacketMap;
 
         // for matching ap with its outgoing packet-list
         private Map<MacAddress, Map<Byte, PacketInfo>> authenticatorMap = new HashMap<>();
@@ -711,9 +712,17 @@ public class Authenticator8021xManager implements Authenticator8021xService {
             }
         }
 
+        // For IEEE 802.1X Authenticators, Calling_Station_ID is used to store the
+        // Supplicant MAC address in ASCII format (upper case only), with octet
+        // values separated by a "-".  Example: "00-10-A4-23-19-C0".
+        // Called_Station_ID is used to store the bridge or Access Point MAC address
+        // in ASCII format (upper case only), with octet values separated by a "-". 
+        // Example: "00-10-A4-23-19-C0". In IEEE 802.11, where the SSID is known, it
+        // SHOULD be appended to the Access Point MAC address, separated from the MAC
+        // address with a ":". Example "00-10-A4-23-19-C0:AP1".
         private class PacketInfo {
-            MacAddress mac;         // RADIUS Calling_Station_Id Attribute
-            String user_name;       // RADIUS User_Name Attribute
+            MacAddress mac;         // RADIUS attribute: 'Calling_Station_Id'
+            String user_name;       // RADIUS attribute: 'User_Name'
             long timestamp;
     
             PacketInfo(String mac, String user_name) {
@@ -729,8 +738,8 @@ public class Authenticator8021xManager implements Authenticator8021xService {
 
         private class ConnectPoints {
             DeviceId device;
-            PortNumber authenticator_port;      // interface port betweeen ovs and wireless-authenticator
-            PortNumber wireless_port;         // data port for wireless-supplicant
+            PortNumber authenticator_port;      // ovs port which is used to connect with the authenticator on AP, and we can only know from the first pkt-in (i.e. InboundPacket.receivedFrom())
+            PortNumber wireless_port;           // ovs-port which is used to connect with the wireless adapter of AP
 
             ConnectPoints(ConnectPoint cp) {
                 int port = 0;
