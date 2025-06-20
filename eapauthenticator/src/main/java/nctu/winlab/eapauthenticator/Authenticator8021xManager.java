@@ -19,6 +19,7 @@ package nctu.winlab.eapauthenticator;
 //import org.onosproject.core.CoreService;
 
 import org.onosproject.cfg.ComponentConfigService;
+import org.onosproject.cli.net.IpProtocol;
 import org.osgi.service.component.ComponentContext;
 import org.osgi.service.component.annotations.Activate;
 import org.osgi.service.component.annotations.Component;
@@ -44,6 +45,8 @@ import org.onosproject.core.CoreService;
 import org.onosproject.core.ApplicationId;
 import static org.onlab.util.Tools.get;
 
+import java.io.IOException;
+import java.net.DatagramPacket;
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -68,6 +71,7 @@ import org.onlab.packet.RADIUS;
 import org.onlab.packet.RADIUSAttribute;
 import org.onlab.packet.IpAddress;
 import org.onlab.packet.DeserializationException;
+import org.onlab.packet.EthType;
 import org.onlab.packet.Ethernet;
 import org.onlab.packet.IPv4;
 import org.onlab.packet.Ip4Prefix;
@@ -77,6 +81,7 @@ import org.onlab.packet.EthType.EtherType;
 import org.onlab.packet.dhcp.Dhcp6LeaseQueryOption;
 import org.onlab.packet.IpPrefix;
 import org.onosproject.net.ConnectPoint;
+import org.onosproject.net.Device;
 import org.onosproject.net.topology.TopologyService;
 import org.onosproject.net.topology.TopologyCluster;
 import org.onosproject.net.packet.PacketPriority;
@@ -128,8 +133,11 @@ import com.mysql.cj.jdbc.Driver;
 public class Authenticator8021xManager implements Authenticator8021xService {
 
     private static final String APP_NAME = "nctu.winlab.eapauthenticator";
+    protected static final String RADIUS_HOST = "192.168.44.128";
+    protected static final MacAddress RADIUS_MAC = MacAddress.valueOf("96:8c:b7:c5:22:c9");
+    protected static final int RADIUS_AUTH_PORT = 1812;
+    protected static final short SOCKET_BIND_PORT = 9998;
     private static final int UDP_HEADER_LENGTH = 8;
-    private static final int RADIUS_AUTH_PORT = 1812;
     private static final int PASSWDERRLIMIT = 3;
     private static final int PACKET_RECORD_TIMEOUT = 60;    // in second
     private static final int BLOCKPERIOD = 180;             // in second
@@ -197,6 +205,10 @@ public class Authenticator8021xManager implements Authenticator8021xService {
     // our application-specific event handler for processing RADIUS packet
     private final RadiusPacketProcessor radiusProcessor = new RadiusPacketProcessor();
 
+    // Socket based communicator with the RADIUS server
+    // SocketBasedRadiusCommunicator comm;
+    Map<DeviceId, SocketBasedRadiusCommunicator> commmunicators;
+
     @Activate
     protected void activate() {
         // cfgService.registerProperties(getClass());
@@ -216,7 +228,8 @@ public class Authenticator8021xManager implements Authenticator8021xService {
         }
 
         DHCPForbid();
-        dbInitial();
+        dbInitialize();
+        communicatorInitailize();
         List<String> groups = getAllGroupName();
         for (String grp : groups) {
             log.info("Group '{}' initialing...", grp);
@@ -234,6 +247,9 @@ public class Authenticator8021xManager implements Authenticator8021xService {
         packetService.removeProcessor(radiusProcessor);
         packetService.removeProcessor(reactiveProcessor);
         flowRuleService.removeFlowRulesById(appId);
+        for (SocketBasedRadiusCommunicator comm : commmunicators.values()) {
+            comm.clearLocalState();
+        }
 
         log.info("Stopped");
     }
@@ -247,6 +263,94 @@ public class Authenticator8021xManager implements Authenticator8021xService {
         log.info("Reconfigured");
     }
 
+    public void communicatorInitailize() {
+        commmunicators = new HashMap<>();
+        try (Connection connection = DriverManager.getConnection(dbUrl, dbUser, dbPassword)) {
+            try (Statement stmt = connection.createStatement()) {
+                String sql = "SELECT switch_uri, wireless_port FROM switch WHERE wireless_port IS NOT NULL";
+                try (ResultSet res = stmt.executeQuery(sql)) {
+                    if (res.next()) {
+                        DeviceId deviceId = DeviceId.deviceId(res.getString("switch_uri"));
+                        int supPort = res.getInt("wireless_port");
+                        ConnectPoint supCp = new ConnectPoint(deviceId, PortNumber.portNumber(supPort));
+                        SocketBasedRadiusCommunicator newComm = new SocketBasedRadiusCommunicator(this, supCp);
+                        newComm.initializeLocalState();
+                        commmunicators.put(deviceId, newComm);
+                    }
+                }
+            }
+        } catch (SQLException e) {
+            log.info("[SQLException] state: " + e.getSQLState() + " message: " + e.getMessage());
+        }
+    }
+
+    public void handleRadiusPacket(RADIUS radiusPacket, AuthenticatorProperties authPro, ConnectPoint authCp, ConnectPoint supCp, Map<Byte, SomeRadiusAttributes> sessions) {
+        byte radiusCode;
+        String user_name = null;
+
+        byte radSessionId = radiusPacket.getIdentifier();
+        SomeRadiusAttributes radReqAttri = sessions.get(radSessionId);
+        RADIUSAttribute radiusAttrUserName =
+                radiusPacket.getAttribute(RADIUSAttribute.RADIUS_ATTR_USERNAME);
+        if (radiusAttrUserName != null) {
+            user_name = new String(radiusAttrUserName.getValue(), StandardCharsets.UTF_8);
+        }
+
+        // Ether header
+        Ethernet eth = new Ethernet();
+        eth.setSourceMACAddress(RADIUS_MAC);
+        eth.setDestinationMACAddress(authPro.authenMac);
+        eth.setEtherType(Ethernet.TYPE_IPV4);
+
+        // IPv4 header
+        IPv4 ip = new IPv4();
+        ip.setSourceAddress(RADIUS_HOST);
+        ip.setDestinationAddress(authPro.authenIp.toString());
+        ip.setProtocol(IPv4.PROTOCOL_UDP);
+
+        // UDP header
+        UDP udp = new UDP();
+        udp.setSourcePort(RADIUS_AUTH_PORT);
+        udp.setDestinationPort(authPro.authenPort);
+        udp.setPayload(radiusPacket);
+        // udp.resetChecksum();
+        ip.setPayload(udp);
+        // ip.resetChecksum();
+        eth.setPayload(ip);
+        eth.setPad(true);
+
+        radiusCode = radiusPacket.getCode();
+        switch (radiusCode) {
+            case RADIUS.RADIUS_CODE_ACCESS_ACCEPT:
+                if (radReqAttri != null){
+                    updateDb(radReqAttri.calling_station_id,
+                            supCp,
+                            user_name,
+                            "AUTHORIZED_STATE");
+                }
+                break;
+            case RADIUS.RADIUS_CODE_ACCESS_REJECT:
+                if (radReqAttri != null) {
+                    updateDb(GATEWAYMAC,
+                            supCp,
+                            user_name,
+                            "UNAUTHORIZED_STATE");
+                }
+                break;
+            case RADIUS.RADIUS_CODE_ACCESS_CHALLENGE:
+                break;
+        }
+
+        // clear all the session records related to this mac
+        for (Iterator<SomeRadiusAttributes> it=sessions.values().iterator(); it.hasNext();) {
+            if (it.next().calling_station_id.equals(radReqAttri.calling_station_id)) {
+                it.remove();
+            }
+        }
+
+        sendToDataPlane(eth, authCp);
+    }
+
     @Override
     public void getAllUsers() {
         commandImpl.getAllUsers();
@@ -257,7 +361,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
         commandImpl.getBadUsers();
     }
 
-    private void dbInitial() {
+    private void dbInitialize() {
         try (Connection connection = DriverManager.getConnection(dbUrl, dbUser, dbPassword)) {
             try (Statement stmt = connection.createStatement()) {
                 String sql = "DELETE FROM authenLog";
@@ -518,18 +622,17 @@ public class Authenticator8021xManager implements Authenticator8021xService {
 
     private class RadiusPacketProcessor implements PacketProcessor {
 
-        // Packet list for matching access-accept with access-request
-        private Map<Byte, PacketInfo> outgoingPacketMap;
+        // // Packet list for matching access-accept with access-request
+        // private Map<Byte, PacketInfo> outgoingPacketMap;
 
-        // for matching ap with its outgoing packet-list
-        private Map<MacAddress, Map<Byte, PacketInfo>> authenticatorMap = new HashMap<>();
+        // // for matching ap with its outgoing packet-list
+        // private Map<MacAddress, Map<Byte, PacketInfo>> authenticatorMap = new HashMap<>();
 
-        // for recording authenticator's location
-        private Map<MacAddress, ConnectPoints> authenticatorLoc = new HashMap<>();
+        // // for recording authenticator's location
+        // private Map<MacAddress, ConnectPoints> authenticatorLoc = new HashMap<>();
 
         @Override
         public void process(PacketContext context) {
-
             if (context.isHandled()) {
                 return;
             }
@@ -559,216 +662,272 @@ public class Authenticator8021xManager implements Authenticator8021xService {
 
                         // block this context from other processor to process
                         context.block();
+                        
+                        handleAuthenticatorPacket(pkt);
+                        // // Parsing RADIUS packet
+                        // // Serialize udp packet first, then deserialize into RADIUS packet
+                        // RADIUS radiusPkt = null;
+                        // // ConnectPoints apCps = null;
+                        // byte[] udpByte = udpPkt.serialize();
+                        // // boolean outgoing = false;
+                        // try {
+                        //     radiusPkt = RADIUS.deserializer()
+                        //                         .deserialize(udpByte,
+                        //                                 UDP_HEADER_LENGTH,
+                        //                                 udpByte.length - UDP_HEADER_LENGTH);
+                        // } catch (DeserializationException dex) {
+                        //     log.error("Cannot deserialize packet", dex);
+                        //     return;
+                        // }
+                        // log.info("Got RADIUS Packet from {}.", pkt.receivedFrom());
 
-                        // Parsing RADIUS packet
-                        // Serialize udp packet first, then deserialize into RADIUS packet
-                        RADIUS radiusPkt = null;
-                        ConnectPoints apCps = null;
-                        byte[] udpByte = udpPkt.serialize();
-                        boolean outgoing = false;
-                        try {
-                            radiusPkt = RADIUS.deserializer()
-                                                .deserialize(udpByte,
-                                                        UDP_HEADER_LENGTH,
-                                                        udpByte.length - UDP_HEADER_LENGTH);
-                        } catch (DeserializationException dex) {
-                            log.error("Cannot deserialize packet", dex);
-                            return;
-                        }
-                        // log.info("Got RADIUS Packet: {}:{}->{}:{}",srcIp, srcPort, dstIp, dstPort);
+                        // // Incoming packet (AP Authenticator <-- RADIUS server)
+                        // if (srcPort == RADIUS_AUTH_PORT) {
+                        //     outgoing = false;
+                        //     outgoingPacketMap = authenticatorMap.get(dstMac);
+                        //     apCps = authenticatorLoc.get(dstMac);
+                        //     if (outgoingPacketMap == null) {
+                        //         log.warn("Can't find corresponding AP's information");
+                        //     }
+                        // }
 
-                        // Incoming packet (AP Authenticator <-- RADIUS server)
-                        if (srcPort == RADIUS_AUTH_PORT) {
-                            outgoing = false;
-                            outgoingPacketMap = authenticatorMap.get(dstMac);
-                            apCps = authenticatorLoc.get(dstMac);
-                            if (outgoingPacketMap == null) {
-                                log.warn("Can't find corresponding AP's information");
-                            }
-                        }
+                        // // Outgoing packet (AP Authenticator --> RADIUS server)
+                        // else if (dstPort == RADIUS_AUTH_PORT) {
+                        //     outgoing = true;
+                        //     outgoingPacketMap = authenticatorMap.get(srcMac);
+                        //     apCps = authenticatorLoc.get(srcMac);
 
-                        // Outgoing packet (AP Authenticator --> RADIUS server)
-                        else if (dstPort == RADIUS_AUTH_PORT) {
-                            outgoing = true;
-                            outgoingPacketMap = authenticatorMap.get(srcMac);
-                            apCps = authenticatorLoc.get(srcMac);
+                        //     // This is the first outgoing packet sent by this wireless-authenticator.
+                        //     if (outgoingPacketMap == null) {
+                        //         authenticatorMap.put(srcMac, new HashMap<>());
+                        //         outgoingPacketMap = authenticatorMap.get(srcMac);
+                        //     }
 
-                            // This is the first outgoing packet sent by this wireless-authenticator.
-                            if (outgoingPacketMap == null) {
-                                authenticatorMap.put(srcMac, new HashMap<>());
-                                outgoingPacketMap = authenticatorMap.get(srcMac);
-                            }
+                        //     // This is the first packet packet-in from new ap.
+                        //     if (apCps == null) {
+                        //         authenticatorLoc.put(srcMac, new ConnectPoints(context.inPacket().receivedFrom()));
+                        //     }
 
-                            // This is the first packet packet-in from new ap.
-                            if (apCps == null) {
-                                authenticatorLoc.put(srcMac, new ConnectPoints(context.inPacket().receivedFrom()));
-                            }
+                        //     // wireless-authenticator location changed
+                        //     else if (!apCps.authenticatorCP().equals(context.inPacket().receivedFrom())) {
+                        //         log.error("Wireless authenticator location changed from {}->{}",
+                        //                 apCps.authenticatorCP(), context.inPacket().receivedFrom());
+                        //         return;
+                        //     }
+                        // }
 
-                            // wireless-authenticator location changed
-                            else if (!apCps.authenticatorCP().equals(context.inPacket().receivedFrom())) {
-                                log.error("Wireless authenticator location changed from {}->{}",
-                                        apCps.authenticatorCP(), context.inPacket().receivedFrom());
-                                return;
-                            }
-                        }
+                        // byte pktId = radiusPkt.getIdentifier();
+                        // boolean isFirstReq = true;
+                        // switch (radiusPkt.getCode()) {
+                        //     case RADIUS.RADIUS_CODE_ACCESS_REQUEST:
 
-                        byte pktId = radiusPkt.getIdentifier();
-                        boolean isFirstReq = true;
-                        switch (radiusPkt.getCode()) {
-                            case RADIUS.RADIUS_CODE_ACCESS_REQUEST:
+                        //         // parse RADIUS attributes
+                        //         RADIUSAttribute radiusAttrUserName =
+                        //                 radiusPkt.getAttribute(RADIUSAttribute.RADIUS_ATTR_USERNAME);
+                        //         String user_name = new String();
+                        //         if (radiusAttrUserName != null) {
+                        //             user_name = new String(radiusAttrUserName.getValue(), StandardCharsets.UTF_8);
+                        //         }
+                        //         RADIUSAttribute radiusAttrCallingStationId =
+                        //                 radiusPkt.getAttribute(RADIUSAttribute.RADIUS_ATTR_CALLING_STATION_ID);
+                        //         String calling_station_id = new String();
+                        //         if (radiusAttrCallingStationId != null) {
+                        //             calling_station_id = new String(radiusAttrCallingStationId.getValue(), StandardCharsets.UTF_8);
+                        //             calling_station_id = calling_station_id.replace('-', ':');
+                        //         }
 
-                                // parse RADIUS attributes
-                                RADIUSAttribute radiusAttrUserName =
-                                        radiusPkt.getAttribute(RADIUSAttribute.RADIUS_ATTR_USERNAME);
-                                String user_name = new String();
-                                if (radiusAttrUserName != null) {
-                                    user_name = new String(radiusAttrUserName.getValue(), StandardCharsets.UTF_8);
-                                }
-                                RADIUSAttribute radiusAttrCallingStationId =
-                                        radiusPkt.getAttribute(RADIUSAttribute.RADIUS_ATTR_CALLING_STATION_ID);
-                                String calling_station_id = new String();
-                                if (radiusAttrCallingStationId != null) {
-                                    calling_station_id = new String(radiusAttrCallingStationId.getValue(), StandardCharsets.UTF_8);
-                                    calling_station_id = calling_station_id.replace('-', ':');
-                                }
+                        //         log.debug("ACCESS_REQUEST [radius_id={}, user_name={}, mac_addr={}]",
+                        //                 pktId, user_name, calling_station_id);
 
-                                log.debug("ACCESS_REQUEST [radius_id={}, user_name={}, mac_addr={}]",
-                                        pktId, user_name, calling_station_id);
+                        //         // check if this is the first ACCESS_REQUEST sent by this supplicant
+                        //         for (PacketInfo pktInfo : outgoingPacketMap.values()) {
+                        //             if (pktInfo.mac.equals(MacAddress.valueOf(calling_station_id))) {
+                        //                 isFirstReq = false;
+                        //                 break;
+                        //             }
+                        //         }
 
-                                // check if this is the first ACCESS_REQUEST sent by this supplicant
-                                for (PacketInfo pktInfo : outgoingPacketMap.values()) {
-                                    if (pktInfo.mac.equals(MacAddress.valueOf(calling_station_id))) {
-                                        isFirstReq = false;
-                                        break;
-                                    }
-                                }
+                        //         if (isFirstReq) {
+                        //             updateDb(MacAddress.valueOf(calling_station_id), apCps.supplicantCP(), user_name, "STARTED_STATE");
+                        //         }
+                        //         outgoingPacketMap.put(pktId, new PacketInfo(calling_station_id, user_name));
+                        //         break;
 
-                                if (isFirstReq) {
-                                    updateDb(MacAddress.valueOf(calling_station_id), apCps.supplicantCP(), user_name, "STARTED_STATE");
-                                }
-                                outgoingPacketMap.put(pktId, new PacketInfo(calling_station_id, user_name));
-                                break;
+                        //     case RADIUS.RADIUS_CODE_ACCESS_CHALLENGE:
+                        //         log.debug("ACCESS_CHALLENGE [radius_id={}]", pktId);
+                        //         break;
 
-                            case RADIUS.RADIUS_CODE_ACCESS_CHALLENGE:
-                                log.debug("ACCESS_CHALLENGE [radius_id={}]", pktId);
-                                break;
+                        //     case RADIUS.RADIUS_CODE_ACCESS_ACCEPT:
+                        //         // Use packet-id to find supplicant information carried in the earlier ACCESS_REQUEST packet.
+                        //         PacketInfo supAccPkt = outgoingPacketMap.get(pktId);
+                        //         if (supAccPkt == null) {
+                        //             log.warn("unkown user has been authorized!");
+                        //         }
+                        //         else {
+                        //             for (Iterator<PacketInfo> it=outgoingPacketMap.values().iterator(); it.hasNext();) {
+                        //                 if (it.next().mac.equals(supAccPkt.mac)) {
+                        //                     it.remove();
+                        //                 }
+                        //             }
+                        //             log.debug("ACCESS_ACCEPT [radius_id={}, user_name={}, mac_addr={}]",
+                        //                     pktId, supAccPkt.user_name, supAccPkt.mac);
+                        //             updateDb(supAccPkt.mac, apCps.supplicantCP(), supAccPkt.user_name, "AUTHORIZED_STATE");
+                        //         }
+                        //         break;
 
-                            case RADIUS.RADIUS_CODE_ACCESS_ACCEPT:
-                                // Use packet-id to find supplicant information carried in the earlier ACCESS_REQUEST packet.
-                                PacketInfo supAccPkt = outgoingPacketMap.get(pktId);
-                                if (supAccPkt == null) {
-                                    log.warn("unkown user has been authorized!");
-                                }
-                                else {
-                                    for (Iterator<PacketInfo> it=outgoingPacketMap.values().iterator(); it.hasNext();) {
-                                        if (it.next().mac.equals(supAccPkt.mac)) {
-                                            it.remove();
-                                        }
-                                    }
-                                    log.debug("ACCESS_ACCEPT [radius_id={}, user_name={}, mac_addr={}]",
-                                            pktId, supAccPkt.user_name, supAccPkt.mac);
-                                    updateDb(supAccPkt.mac, apCps.supplicantCP(), supAccPkt.user_name, "AUTHORIZED_STATE");
-                                }
-                                break;
+                        //     case RADIUS.RADIUS_CODE_ACCESS_REJECT:
+                        //         PacketInfo supRejected = outgoingPacketMap.get(pktId);
+                        //         if (supRejected == null) {
+                        //             log.warn("unkown user has benn rejected!");
+                        //         }
+                        //         else {
+                        //             for (Iterator<PacketInfo> it=outgoingPacketMap.values().iterator(); it.hasNext();) {
+                        //                 if (it.next().mac.equals(supRejected.mac)) {
+                        //                     it.remove();
+                        //                 }
+                        //             }
+                        //             log.debug("ACCESS_REJECT [radius_id={}, user_name={}, mac_addr={}]",
+                        //                     pktId, supRejected.user_name, supRejected.mac);
+                        //             updateDb(supRejected.mac, apCps.supplicantCP(), supRejected.user_name, "UNAUTHORIZED_STATE");
+                        //         }
+                        //         break;
+                        // }
 
-                            case RADIUS.RADIUS_CODE_ACCESS_REJECT:
-                                PacketInfo supRejected = outgoingPacketMap.get(pktId);
-                                if (supRejected == null) {
-                                    log.warn("unkown user has benn rejected!");
-                                }
-                                else {
-                                    for (Iterator<PacketInfo> it=outgoingPacketMap.values().iterator(); it.hasNext();) {
-                                        if (it.next().mac.equals(supRejected.mac)) {
-                                            it.remove();
-                                        }
-                                    }
-                                    log.debug("ACCESS_REJECT [radius_id={}, user_name={}, mac_addr={}]",
-                                            pktId, supRejected.user_name, supRejected.mac);
-                                    updateDb(supRejected.mac, apCps.supplicantCP(), supRejected.user_name, "UNAUTHORIZED_STATE");
-                                }
-                                break;
-                        }
+                        // if (outgoing) {
+                        //     log.debug("Relay packet to RADIUS server at {}", RADIUS_SERVER_CONNCECT_POINT);
+                        //     sendToDataPlane(ethPkt, RADIUS_SERVER_CONNCECT_POINT);
+                        // }
+                        // else {
+                        //     log.debug("Relay packet to AP at {}", apCps);
+                        //     sendToDataPlane(ethPkt, apCps.authenticatorCP());
+                        // }
 
-                        if (outgoing) {
-                            log.debug("Relay packet to RADIUS server at {}", RADIUS_SERVER_CONNCECT_POINT);
-                            sendToDataPlane(ethPkt, RADIUS_SERVER_CONNCECT_POINT);
-                        }
-                        else {
-                            log.debug("Relay packet to AP at {}", apCps);
-                            sendToDataPlane(ethPkt, apCps.authenticatorCP());
-                        }
-
-                        // Passively clean up stale packet records
-                        for (Iterator<PacketInfo> itp = outgoingPacketMap.values().iterator(); itp.hasNext();) {
-                            Calendar cal = Calendar.getInstance();
-                            PacketInfo pktInfo = itp.next();
-                            if (pktInfo.timestamp <= cal.getTimeInMillis()) {
-                                log.debug("Cleaning up stale packet record...");
-                                itp.remove();
-                            }
-                        }
+                        // // Passively clean up stale packet records
+                        // for (Iterator<PacketInfo> itp = outgoingPacketMap.values().iterator(); itp.hasNext();) {
+                        //     Calendar cal = Calendar.getInstance();
+                        //     PacketInfo pktInfo = itp.next();
+                        //     if (pktInfo.timestamp <= cal.getTimeInMillis()) {
+                        //         log.debug("Cleaning up stale packet record...");
+                        //         itp.remove();
+                        //     }
+                        // }
                     }
                 }
             }
         }
 
-        // For IEEE 802.1X Authenticators, Calling_Station_ID is used to store the
-        // Supplicant MAC address in ASCII format (upper case only), with octet
-        // values separated by a "-".  Example: "00-10-A4-23-19-C0".
-        // Called_Station_ID is used to store the bridge or Access Point MAC address
-        // in ASCII format (upper case only), with octet values separated by a "-". 
-        // Example: "00-10-A4-23-19-C0". In IEEE 802.11, where the SSID is known, it
-        // SHOULD be appended to the Access Point MAC address, separated from the MAC
-        // address with a ":". Example "00-10-A4-23-19-C0:AP1".
-        private class PacketInfo {
-            MacAddress mac;         // RADIUS attribute: 'Calling_Station_Id'
-            String user_name;       // RADIUS attribute: 'User_Name'
-            long timestamp;
+        // // For IEEE 802.1X Authenticators, Calling_Station_ID is used to store the
+        // // Supplicant MAC address in ASCII format (upper case only), with octet
+        // // values separated by a "-".  Example: "00-10-A4-23-19-C0".
+        // // Called_Station_ID is used to store the bridge or Access Point MAC address
+        // // in ASCII format (upper case only), with octet values separated by a "-". 
+        // // Example: "00-10-A4-23-19-C0". In IEEE 802.11, where the SSID is known, it
+        // // SHOULD be appended to the Access Point MAC address, separated from the MAC
+        // // address with a ":". Example "00-10-A4-23-19-C0:AP1".
+        // private class PacketInfo {
+        //     MacAddress mac;         // RADIUS attribute: 'Calling_Station_Id'
+        //     String user_name;       // RADIUS attribute: 'User_Name'
+        //     long timestamp;
     
-            PacketInfo(String mac, String user_name) {
-                this.mac = MacAddress.valueOf(mac);
-                this.user_name = user_name;
+        //     PacketInfo(String mac, String user_name) {
+        //         this.mac = MacAddress.valueOf(mac);
+        //         this.user_name = user_name;
 
-                // entry-timeout
-                Calendar cal = Calendar.getInstance();
-                cal.add(Calendar.SECOND, PACKET_RECORD_TIMEOUT);
-                timestamp = cal.getTimeInMillis();
+        //         // entry-timeout
+        //         Calendar cal = Calendar.getInstance();
+        //         cal.add(Calendar.SECOND, PACKET_RECORD_TIMEOUT);
+        //         timestamp = cal.getTimeInMillis();
+        //     }
+        // }
+
+        // private class ConnectPoints {
+        //     DeviceId device;
+        //     PortNumber authenticator_port;      // ovs port which is used to connect with the authenticator on AP, and we can only know from the first pkt-in (i.e. InboundPacket.receivedFrom())
+        //     PortNumber wireless_port;           // ovs-port which is used to connect with the wireless adapter of AP
+
+        //     ConnectPoints(ConnectPoint cp) {
+        //         int port = 0;
+        //         try (Connection connection = DriverManager.getConnection(dbUrl, dbUser, dbPassword)) {
+        //             try (Statement stmt = connection.createStatement()) {
+        //                 String sql = "SELECT wireless_port FROM switch " +
+        //                                 "WHERE switch_uri = '" + cp.deviceId().toString() + "'";
+        //                 try (ResultSet res = stmt.executeQuery(sql)) {
+        //                     if (res.next()) {
+        //                         port = res.getInt("wireless_port");
+        //                     }
+        //                 }
+        //             }
+        //         } catch (SQLException e) {
+        //             log.info("[SQLException] state: " + e.getSQLState() + " message: " + e.getMessage());
+        //         }
+
+        //         this.device = cp.deviceId();
+        //         this.authenticator_port = cp.port();
+        //         this.wireless_port = PortNumber.portNumber(port);
+        //     }
+
+        //     ConnectPoint authenticatorCP() {
+        //         return new ConnectPoint(device, authenticator_port);
+        //     }
+
+        //     ConnectPoint supplicantCP() {
+        //         return new ConnectPoint(device, wireless_port);
+        //     }
+        // }
+
+        private void handleAuthenticatorPacket(InboundPacket inPacket) {
+            Ethernet ethPkt = inPacket.parsed();
+            MacAddress srcMac = ethPkt.getSourceMAC();
+            DeviceId deviceId = inPacket.receivedFrom().deviceId();
+            IPv4 ip4Pkt = (IPv4) ethPkt.getPayload();
+            IpAddress srcIp = IpAddress.valueOf(ip4Pkt.getSourceAddress());
+            UDP udpPkt = (UDP) ip4Pkt.getPayload();
+            int srcPort = udpPkt.getSourcePort();
+            RADIUS radiusPkt = null;
+            byte[] udpByte = udpPkt.serialize();
+            try {
+                radiusPkt = RADIUS.deserializer()
+                                    .deserialize(udpByte,
+                                            UDP_HEADER_LENGTH,
+                                            udpByte.length - UDP_HEADER_LENGTH);
+            } catch (DeserializationException dex) {
+                log.error("Cannot deserialize packet", dex);
             }
-        }
+            log.info("Got RADIUS Packet from {}.", inPacket.receivedFrom());
 
-        private class ConnectPoints {
-            DeviceId device;
-            PortNumber authenticator_port;      // ovs port which is used to connect with the authenticator on AP, and we can only know from the first pkt-in (i.e. InboundPacket.receivedFrom())
-            PortNumber wireless_port;           // ovs-port which is used to connect with the wireless adapter of AP
+            RADIUSAttribute radAtCallingStationId =
+            radiusPkt.getAttribute(RADIUSAttribute.RADIUS_ATTR_CALLING_STATION_ID);
+            RADIUSAttribute radAtUserName =
+            radiusPkt.getAttribute(RADIUSAttribute.RADIUS_ATTR_USERNAME);
+            String callingSationId = null;
+            String userName = null;
+            if (radAtCallingStationId != null) {
+                callingSationId = new String(radAtCallingStationId.getValue(), StandardCharsets.UTF_8);
+                callingSationId = callingSationId.replace('-', ':');
+            }
+            if (radAtUserName != null) {
+                userName = new String(radAtUserName.getValue(), StandardCharsets.UTF_8);
+            }
+            SocketBasedRadiusCommunicator comm = commmunicators.get(deviceId);
+            if (comm.sessions == null) {
+                comm.initializeAuthenticatorProperties(srcMac, srcIp, srcPort, inPacket.receivedFrom());
+            }
 
-            ConnectPoints(ConnectPoint cp) {
-                int port = 0;
-                try (Connection connection = DriverManager.getConnection(dbUrl, dbUser, dbPassword)) {
-                    try (Statement stmt = connection.createStatement()) {
-                        String sql = "SELECT wireless_port FROM switch " +
-                                        "WHERE switch_uri = '" + cp.deviceId().toString() + "'";
-                        try (ResultSet res = stmt.executeQuery(sql)) {
-                            if (res.next()) {
-                                port = res.getInt("wireless_port");
-                            }
-                        }
+            byte radSessionId = radiusPkt.getIdentifier();
+            byte radCode = radiusPkt.getCode();
+            MacAddress supMac = MacAddress.valueOf(callingSationId);
+            if (radCode == RADIUS.RADIUS_CODE_ACCESS_REQUEST) {
+                for (SomeRadiusAttributes some : comm.sessions.values()) {
+                    if (some.calling_station_id.equals(supMac)) {
+                        updateDb(supMac,
+                                    comm.getSupplicantConnectionPoint(),
+                                    userName,
+                                    "STARTED_STATE");
                     }
-                } catch (SQLException e) {
-                    log.info("[SQLException] state: " + e.getSQLState() + " message: " + e.getMessage());
                 }
-
-                this.device = cp.deviceId();
-                this.authenticator_port = cp.port();
-                this.wireless_port = PortNumber.portNumber(port);
             }
-
-            ConnectPoint authenticatorCP() {
-                return new ConnectPoint(device, authenticator_port);
-            }
-
-            ConnectPoint supplicantCP() {
-                return new ConnectPoint(device, wireless_port);
-            }
+            comm.sessions.put(radSessionId, new SomeRadiusAttributes(callingSationId, userName));
+            comm.sendRadiusPacket(radiusPkt);
         }
     }
 
