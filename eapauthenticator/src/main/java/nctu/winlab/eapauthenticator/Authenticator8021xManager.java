@@ -134,7 +134,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
 
     private static final String APP_NAME = "nctu.winlab.eapauthenticator";
     protected static final String RADIUS_HOST = "192.168.44.128";
-    protected static final MacAddress RADIUS_MAC = MacAddress.valueOf("96:8c:b7:c5:22:c9");
+    protected static final MacAddress RADIUS_MAC = MacAddress.valueOf("02:42:ac:11:00:02");
     protected static final int RADIUS_AUTH_PORT = 1812;
     protected static final short SOCKET_BIND_PORT = 9998;
     private static final int UDP_HEADER_LENGTH = 8;
@@ -313,9 +313,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
         udp.setSourcePort(RADIUS_AUTH_PORT);
         udp.setDestinationPort(authPro.authenPort);
         udp.setPayload(radiusPacket);
-        // udp.resetChecksum();
         ip.setPayload(udp);
-        // ip.resetChecksum();
         eth.setPayload(ip);
         eth.setPad(true);
 
@@ -328,24 +326,29 @@ public class Authenticator8021xManager implements Authenticator8021xService {
                             user_name,
                             "AUTHORIZED_STATE");
                 }
+                // clear all the session records related to this mac
+                for (Iterator<SomeRadiusAttributes> it=sessions.values().iterator(); it.hasNext();) {
+                    if (it.next().calling_station_id.equals(radReqAttri.calling_station_id)) {
+                        it.remove();
+                    }
+                }
                 break;
             case RADIUS.RADIUS_CODE_ACCESS_REJECT:
                 if (radReqAttri != null) {
-                    updateDb(GATEWAYMAC,
+                    updateDb(radReqAttri.calling_station_id,
                             supCp,
                             user_name,
                             "UNAUTHORIZED_STATE");
                 }
+                // clear all the session records related to this mac
+                for (Iterator<SomeRadiusAttributes> it=sessions.values().iterator(); it.hasNext();) {
+                    if (it.next().calling_station_id.equals(radReqAttri.calling_station_id)) {
+                        it.remove();
+                    }
+                }
                 break;
             case RADIUS.RADIUS_CODE_ACCESS_CHALLENGE:
                 break;
-        }
-
-        // clear all the session records related to this mac
-        for (Iterator<SomeRadiusAttributes> it=sessions.values().iterator(); it.hasNext();) {
-            if (it.next().calling_station_id.equals(radReqAttri.calling_station_id)) {
-                it.remove();
-            }
         }
 
         sendToDataPlane(eth, authCp);
@@ -916,14 +919,19 @@ public class Authenticator8021xManager implements Authenticator8021xService {
             byte radSessionId = radiusPkt.getIdentifier();
             byte radCode = radiusPkt.getCode();
             MacAddress supMac = MacAddress.valueOf(callingSationId);
+            boolean isFirst = true;
             if (radCode == RADIUS.RADIUS_CODE_ACCESS_REQUEST) {
                 for (SomeRadiusAttributes some : comm.sessions.values()) {
                     if (some.calling_station_id.equals(supMac)) {
-                        updateDb(supMac,
-                                    comm.getSupplicantConnectionPoint(),
-                                    userName,
-                                    "STARTED_STATE");
+                        isFirst = false;
+                        break;
                     }
+                }
+                if (isFirst) {
+                    updateDb(supMac,
+                                comm.getSupplicantConnectionPoint(),
+                                userName,
+                                "STARTED_STATE");
                 }
             }
             comm.sessions.put(radSessionId, new SomeRadiusAttributes(callingSationId, userName));
@@ -1303,7 +1311,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
     }
 
     /**
-     * Send the ethernet packet to the authenticator or RADIUS server.
+     * Send ethernet packet to the authenticator.
      * 
      * @param ethernetPkt
      * @param coonectPt
@@ -1322,6 +1330,7 @@ public class Authenticator8021xManager implements Authenticator8021xService {
 
     /**
     * Allow DHCP.
+    *
     * @param supMac
     * @param cp
     * @param loginTimeout
